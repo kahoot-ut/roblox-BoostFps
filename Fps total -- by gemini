@@ -1,0 +1,439 @@
+
+--!strict
+
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+
+type Mode = "LOW" | "MEDIUM" | "HIGH"
+
+local SETTINGS = {
+    FrameBudget = 0.01,
+    ReoptimizeInterval = 10,
+    FPS_Thresholds = {
+        LOW = 25,
+        MEDIUM = 45
+    }
+}
+
+local currentMode: Mode = "HIGH"
+local fps = 60
+
+local PerformanceOptimizer = {}
+
+-- 📊 FPS Monitor
+task.spawn(function()
+    local last = tick()
+    local frames = 0
+
+    RunService.Heartbeat:Connect(function()
+        frames += 1
+        if tick() - last >= 1 then
+            fps = frames
+            frames = 0
+            last = tick()
+
+            if fps <= SETTINGS.FPS_Thresholds.LOW then
+                currentMode = "LOW"
+            elseif fps <= SETTINGS.FPS_Thresholds.MEDIUM then
+                currentMode = "MEDIUM"
+            else
+                currentMode = "HIGH"
+            end
+        end
+    end)
+end)
+
+-- 🔒 Proteção
+local function isProtected(instance: Instance): boolean
+    if instance:IsA("Script") or instance:IsA("LocalScript") or instance:IsA("ModuleScript") then
+        return true
+    end
+
+    local player = Players.LocalPlayer
+    if player then
+        if player.Character and instance:IsDescendantOf(player.Character) then
+            return true
+        end
+
+        local gui = player:FindFirstChildOfClass("PlayerGui")
+        if gui and instance:IsDescendantOf(gui) then
+            return true
+        end
+    end
+
+    if instance:IsDescendantOf(CoreGui) or instance:IsA("GuiObject") then
+        return true
+    end
+
+    return false
+end
+
+-- ⚙️ Aplicação por modo
+local function optimizeInstance(obj: Instance)
+    if isProtected(obj) then return end
+
+    if obj:IsA("BasePart") then
+        obj.CastShadow = false
+        obj.Reflectance = 0
+
+        if currentMode ~= "HIGH" then
+            obj.Material = Enum.Material.SmoothPlastic
+        end
+
+        if currentMode == "LOW" then
+            obj.CanTouch = false
+            obj.CanQuery = false
+        end
+
+        if obj:IsA("MeshPart") then
+            obj.RenderFidelity = Enum.RenderFidelity.Performance
+            pcall(function()
+                obj.TextureID = ""
+            end)
+        end
+
+    elseif obj:IsA("Decal") or obj:IsA("Texture") then
+        if currentMode ~= "HIGH" then
+            obj.Transparency = 1
+        end
+
+    elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") then
+        if currentMode ~= "HIGH" then
+            obj.Enabled = false
+        end
+
+    elseif obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
+        obj.Enabled = false
+
+    elseif obj:IsA("Atmosphere") or obj:IsA("Clouds") then
+        pcall(function()
+            (obj :: any).Enabled = false
+        end)
+    end
+end
+
+-- 🌎 Lighting
+local function optimizeLighting()
+    Lighting.GlobalShadows = false
+    Lighting.FogEnd = 9e9
+    Lighting.Brightness = 1
+
+    for _, v in ipairs(Lighting:GetChildren()) do
+        if v:IsA("Sky")
+        or v:IsA("BloomEffect")
+        or v:IsA("ColorCorrectionEffect")
+        or v:IsA("DepthOfFieldEffect") then
+            v:Destroy()
+        end
+    end
+end
+
+-- 🔁 Batch Processor
+local function processBatch(list: {Instance})
+    local start = os.clock()
+
+    for i, v in ipairs(list) do
+        optimizeInstance(v)
+
+        if i % 100 == 0 and os.clock() - start > SETTINGS.FrameBudget then
+            task.wait()
+            start = os.clock()
+        end
+    end
+end
+
+-- 🔄 Reaplicar otimização
+local function autoReoptimize()
+    while true do
+        task.wait(SETTINGS.ReoptimizeInterval)
+        processBatch(Workspace:GetDescendants())
+    end
+end
+
+-- ⚙️ Hidden settings
+local function applyHidden()
+    pcall(function()
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    end)
+end
+
+-- 🚀 Start
+function PerformanceOptimizer.start()
+    optimizeLighting()
+    task.spawn(applyHidden)
+
+    task.defer(function()
+        processBatch(Workspace:GetDescendants())
+    end)
+
+    Workspace.DescendantAdded:Connect(function(v)
+        task.defer(optimizeInstance, v)
+    end)
+
+    task.spawn(autoReoptimize)
+end
+
+PerformanceOptimizer.start()
+
+return PerformanceOptimizerart(): ()
+    initializeLighting()
+    task.spawn(applyHiddenSettings)
+
+    -- Buffered Workspace Traversal
+    task.defer(function()
+        local descendants = Workspace:GetDescendants()
+        local startTime = os.clock()
+
+        for i, v in ipairs(descendants) do
+            optimizeInstance(v)
+
+            -- Frame budget management
+            if i % 100 == 0 and (os.clock() - startTime) > SETTINGS.FrameBudget then
+                task.wait()
+                startTime = os.clock()
+            end
+        end
+    end)
+
+    -- Dynamic monitoring
+    Workspace.DescendantAdded:Connect(function(v: Instance)
+        task.defer(optimizeInstance, v)
+    end)
+end
+
+PerformanceOptimizer.start()
+
+return PerformanceOptimizer
+
+--!strict
+-- Complemento: Network & Physics Optimizer + HUD
+local RunService = game:GetService("RunService")
+local Stats = game:GetService("Stats")
+local Players = game:GetService("Players")
+
+local HUD_ENABLED = true
+
+local function createHUD()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "PerfStats"
+    screenGui.IgnoreGuiInset = true
+    screenGui.Parent = game:GetService("CoreGui")
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 200, 0, 80)
+    frame.Position = UDim2.new(0, 10, 0, 10)
+    frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    frame.BackgroundTransparency = 0.5
+    frame.Parent = screenGui
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -10, 1, -10)
+    label.Position = UDim2.new(0, 5, 0, 5)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextSize = 14
+    label.Font = Enum.Font.Code
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = frame
+
+    return label
+end
+
+local function optimizeNetwork()
+    -- Melhora a replicação de física
+    settings().Physics.PhysicsEnvironmentalThrottle = Enum.EnviromentalPhysicsThrottle.Enabled
+    settings().Physics.AllowSleep = true
+    
+    -- Tenta reduzir o streaming de entrada (se aplicável)
+    local player = Players.LocalPlayer
+    if player then
+        player.ReplicationFocus = nil -- Deixa o motor decidir a prioridade
+    end
+end
+
+local function clearGarbage()
+    -- Limpa o cache de sons e texturas não utilizados periodicamente
+    task.spawn(function()
+        while true do
+            task.wait(60)
+            collectgarbage("collect")
+        end
+    end)
+end
+
+-- 🚀 Inicialização
+local label = HUD_ENABLED and createHUD() or nil
+
+RunService.RenderStepped:Connect(function(deltaTime)
+    if label then
+        local fps = math.floor(1/deltaTime)
+        local ping = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue())
+        local mem = math.floor(Stats:GetTotalMemoryUsageMb())
+        
+        label.Text = string.format(
+            "FPS: %d\nPing: %d ms\nMem: %d MB\nMode: %s",
+            fps, ping, mem, "OPTIMIZED"
+        )
+        
+        -- Cor dinâmica para alerta
+        if fps < 30 then label.TextColor3 = Color3.fromRGB(255, 100, 100)
+        elseif fps < 50 then label.TextColor3 = Color3.fromRGB(255, 255, 100)
+        else label.TextColor3 = Color3.fromRGB(100, 255, 100) end
+    end
+end)
+
+optimizeNetwork()
+clearGarbage()
+
+print("🚀 [Extra] Network & Physics Optimization Loaded.")
+
+-- 🧊 Configurações Adicionais
+local EXTRA_SETTINGS = {
+	MaxRenderDistance = 500, -- Distância máxima para ver objetos (em studs)
+	CullingInterval = 2,    -- Segundos entre cada verificação de distância
+	ClearGarbageInterval = 60 -- Segundos para forçar limpeza de cache
+}
+
+-- 🧹 Limpeza de Memória (GC Manual)
+local function clearMemory()
+	collectgarbage("collect")
+end
+
+-- 👁️ Renderização Dinâmica (Culling)
+-- Esconde objetos longe da câmera para aliviar a GPU
+local function startDynamicRender()
+	task.spawn(function()
+		while true do
+			local player = Players.LocalPlayer
+			local character = player and player.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+
+			if root then
+				local charPos = root.Position
+				local descendants = Workspace:GetDescendants()
+				local start = os.clock()
+
+				for i, obj in ipairs(descendants) do
+					if obj:IsA("BasePart") and not isProtected(obj) then
+						local distance = (obj.Position - charPos).Magnitude
+						
+						if distance > EXTRA_SETTINGS.MaxRenderDistance then
+							-- Esconde se estiver longe
+							if obj.Transparency ~= 1 then
+								obj.LocalTransparencyModifier = 1
+							end
+						else
+							-- Mostra se estiver perto
+							obj.LocalTransparencyModifier = 0
+						end
+					end
+
+					-- Mantém a estabilidade do Frame Budget
+					if i % 250 == 0 and (os.clock() - start) > SETTINGS.FrameBudget then
+						task.wait()
+						start = os.clock()
+					end
+				end
+			end
+			task.wait(EXTRA_SETTINGS.CullingInterval)
+		end
+	end)
+end
+
+-- 🛠️ Integração com o PerformanceOptimizer original
+local originalStart = PerformanceOptimizer.start
+function PerformanceOptimizer.start()
+	originalStart() -- Roda o que você já tinha
+	
+	-- Inicia as novas funções
+	task.spawn(startDynamicRender)
+	
+	task.spawn(function()
+		while true do
+			task.wait(EXTRA_SETTINGS.ClearGarbageInterval)
+			clearMemory()
+		end
+	end)
+	
+	print("🔥 Performance Optimizer Extra Ativado!")
+end
+
+-- 🎨 Configurações de Renderização de Baixo Nível
+local GRAPHICS_SETTINGS = {
+    DisableMaterials = true, -- Remove texturas de materiais (Granito, Madeira, etc)
+    LowResTextures = true,   -- Tenta "esmagar" o ID das texturas
+    DisableParticles = true  -- Garante que emissores novos sejam desligados
+}
+
+-- 🛠️ Função para remover "poluição" visual de texturas
+local function crushTexture(obj: Instance)
+    if obj:IsA("Texture") or obj:IsA("Decal") then
+        obj.Texture = "" -- Remove a imagem mas mantém o objeto
+    elseif obj:IsA("MeshPart") then
+        obj.TextureID = "" -- Remove a "pele" do mesh, deixando-o cinza/liso
+    elseif obj:IsA("SpecialMesh") then
+        obj.TextureId = ""
+    end
+end
+
+-- ⚡ Forçar Renderização Low-End (FastFlags Simulator)
+local function forceLowLevelSettings()
+    local settings = settings().Rendering
+    
+    pcall(function()
+        settings.QualityLevel = Enum.QualityLevel.Level01
+        settings.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level01
+    end)
+    
+    -- Desativa o Anti-Aliasing interno se possível (via API de simulação)
+    local terrain = Workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        terrain.WaterWaveSize = 0
+        terrain.WaterWaveSpeed = 0
+        terrain.WaterReflectance = 0
+        terrain.WaterTransparency = 0
+    end
+end
+
+-- 🔄 Monitor de Texturas em tempo real
+local function startTextureMonitor()
+    -- Processa o que já existe
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        if not isProtected(v) then
+            crushTexture(v)
+        end
+    end
+
+    -- Monitora novas texturas entrando no jogo (ex: armas, carros spawnados)
+    Workspace.DescendantAdded:Connect(function(v)
+        if not isProtected(v) then
+            task.delay(0.1, function() -- Pequeno delay para garantir carregamento
+                crushTexture(v)
+            end)
+        end
+    end)
+end
+
+-- 🚀 Integração final no PerformanceOptimizer
+local originalStart = PerformanceOptimizer.start
+function PerformanceOptimizer.start()
+    originalStart() -- Roda as funções anteriores
+    
+    forceLowLevelSettings()
+    
+    if GRAPHICS_SETTINGS.LowResTextures then
+        task.spawn(startTextureMonitor)
+    end
+    
+    -- Ajuste de Terreno adicional
+    local terrain = Workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        terrain:Clear() -- Opcional: Remove grama e decorações de terreno
+    end
+    
+    print("💎 Texture Crusher e Low-Level Graphics Aplicados!")
+end
+
