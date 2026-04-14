@@ -1,186 +1,184 @@
 --!strict
 
---// SERVICES
+--// SERVIÇOS
 local Lighting = game:GetService("Lighting")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
---// SETTINGS
+--// CONFIGURAÇÕES
 local SETTINGS = {
-    FrameBudget = 0.005,
-    ReoptimizeInterval = 20,
-    FPS_Thresholds = {
-        LOW = 25,
-        MEDIUM = 45
-    }
+	FrameBudget = 0.003, -- Menor para não causar stuttering
+	ReoptimizeInterval = 15,
+	MaxParticleRate = 5, -- Máximo de partículas por segundo no LOW
+	LightDistanceCutoff = 80, -- Distância para apagar luzes
+	FPS_Thresholds = {
+		LOW = 30,
+		MEDIUM = 50
+	}
 }
 
 type Mode = "LOW" | "MEDIUM" | "HIGH"
 local currentMode: Mode = "HIGH"
 local fps = 60
-
---// STATE
 local processed = {} :: {[Instance]: boolean}
+local localPlayer = Players.LocalPlayer
 
---// FPS MONITOR
+--// FPS MONITOR & ADAPTATIVE QUALITY
 task.spawn(function()
-    local last = tick()
-    local frames = 0
+	local last = tick()
+	local frames = 0
 
-    RunService.Heartbeat:Connect(function()
-        frames += 1
+	RunService.Heartbeat:Connect(function()
+		frames += 1
+		if tick() - last >= 1 then
+			fps = frames
+			frames = 0
+			last = tick()
 
-        if tick() - last >= 1 then
-            fps = frames
-            frames = 0
-            last = tick()
-
-            if fps <= SETTINGS.FPS_Thresholds.LOW then
-                currentMode = "LOW"
-            elseif fps <= SETTINGS.FPS_Thresholds.MEDIUM then
-                currentMode = "MEDIUM"
-            else
-                currentMode = "HIGH"
-            end
-        end
-    end)
+			if fps <= SETTINGS.FPS_Thresholds.LOW then
+				currentMode = "LOW"
+			elseif fps <= SETTINGS.FPS_Thresholds.MEDIUM then
+				currentMode = "MEDIUM"
+			else
+				currentMode = "HIGH"
+			end
+		end
+	end)
 end)
 
---// PROTECTION
+--// PROTEÇÃO (EVITAR QUEBRAR O PERSONAGEM OU GUI)
 local function isProtected(obj: Instance): boolean
-    if obj:IsA("Script") or obj:IsA("LocalScript") or obj:IsA("ModuleScript") then
-        return true
-    end
-
-    local player = Players.LocalPlayer
-    if player then
-        if player.Character and obj:IsDescendantOf(player.Character) then
-            return true
-        end
-
-        local gui = player:FindFirstChildOfClass("PlayerGui")
-        if gui and obj:IsDescendantOf(gui) then
-            return true
-        end
-    end
-
-    return false
+	if obj:IsA("LuaSourceContainer") then return true end
+	if localPlayer.Character and obj:IsDescendantOf(localPlayer.Character) then return true end
+	if obj:IsDescendantOf(localPlayer:WaitForChild("PlayerGui")) then return true end
+	return false
 end
 
---// OPTIMIZE INSTANCE
+--// OTIMIZAÇÃO DE INSTÂNCIA (O CORAÇÃO DO SCRIPT)
 local function optimizeInstance(obj: Instance)
-    if processed[obj] or isProtected(obj) then return end
-    processed[obj] = true
+	if not obj or processed[obj] or isProtected(obj) then return end
+	processed[obj] = true
 
-    if obj:IsA("BasePart") then
-        obj.CastShadow = false
-        obj.Reflectance = 0
+	-- Otimização de Mesh e Partes
+	if obj:IsA("BasePart") then
+		obj.CastShadow = false
+		if currentMode ~= "HIGH" then
+			obj.Reflectance = 0
+			obj.Material = Enum.Material.SmoothPlastic
+		end
+		
+		-- Reduz colisões desnecessárias que pesam no processamento de física
+		if currentMode == "LOW" and not obj:IsA("MeshPart") then
+			obj.CanTouch = false
+		end
 
-        if currentMode ~= "HIGH" then
-            obj.Material = Enum.Material.SmoothPlastic
-        end
+	-- Otimização de Efeitos Visual (Partículas são as vilãs do FPS)
+	elseif obj:IsA("ParticleEmitter") then
+		if currentMode == "LOW" then
+			obj.Enabled = false -- Desativa no extremo
+		elseif currentMode == "MEDIUM" then
+			obj.Rate = math.min(obj.Rate, SETTINGS.MaxParticleRate)
+		end
+		
+	elseif obj:IsA("Explosion") then
+		obj.Visible = false
+		obj.BlastPressure = 0 -- Remove lag de física de explosão
 
-        if currentMode == "LOW" then
-            obj.CanTouch = false
-            obj.CanQuery = false
-        end
+	elseif obj:IsA("Decal") or obj:IsA("Texture") then
+		if currentMode == "LOW" then
+			obj.Transparency = 1 -- Oculta para poupar VRAM
+		end
 
-    elseif obj:IsA("Decal") or obj:IsA("Texture") then
-        if currentMode == "LOW" then
-            obj.Transparency = 1
-        end
-
-    elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") then
-        if currentMode ~= "HIGH" then
-            obj.Enabled = false
-        end
-
-    elseif obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
-        if currentMode ~= "HIGH" then
-            obj.Enabled = false
-        end
-    end
+	-- Otimização de Iluminação Dinâmica
+	elseif obj:IsA("Light") then
+		if currentMode == "LOW" then
+			obj.Enabled = false
+		elseif currentMode == "MEDIUM" then
+			obj.Shadows = false
+		end
+	end
 end
 
---// LIGHTING OPTIMIZATION
-local function optimizeLighting()
-    Lighting.GlobalShadows = false
-    Lighting.FogEnd = 9e9
-    Lighting.Brightness = 1
+--// LIMPEZA GLOBAL DE AMBIENTE
+local function applyGlobalSettings()
+	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+	
+	Lighting.GlobalShadows = false
+	Lighting.FogEnd = 9e9
+	Lighting.Brightness = 1
+	
+	for _, effect in ipairs(Lighting:GetChildren()) do
+		if effect:IsA("PostEffect") then
+			effect.Enabled = false
+		end
+	end
 
-    for _, v in ipairs(Lighting:GetChildren()) do
-        if v:IsA("PostEffect") then
-            v.Enabled = false
-        end
-    end
+	local terrain = Workspace:FindFirstChildOfClass("Terrain")
+	if terrain then
+		terrain.WaterWaveSize = 0
+		terrain.WaterWaveSpeed = 0
+		terrain.WaterReflectance = 0
+		terrain.WaterTransparency = 1
+	end
 end
 
---// BATCH PROCESSOR
-local function processBatch(list: {Instance})
-    local start = os.clock()
-
-    for i, obj in ipairs(list) do
-        optimizeInstance(obj)
-
-        if i % 100 == 0 and (os.clock() - start) > SETTINGS.FrameBudget then
-            task.wait()
-            start = os.clock()
-        end
-    end
+--// PROCESSAMENTO EM LOTES (EVITA CONGELAR A TELA)
+local function processBatch(list: {any})
+	local startTime = os.clock()
+	for i, obj in ipairs(list) do
+		optimizeInstance(obj)
+		
+		if i % 50 == 0 and (os.clock() - startTime) > SETTINGS.FrameBudget then
+			RunService.Heartbeat:Wait()
+			startTime = os.clock()
+		end
+	end
 end
 
---// INITIAL SCAN (RUN ONCE)
-local function initialOptimize()
-    task.spawn(function()
-        processBatch(Workspace:GetDescendants())
-    end)
-end
-
---// AUTO OPTIMIZE (LIGHTWEIGHT)
-local function autoOptimize()
-    task.spawn(function()
-        while true do
-            task.wait(SETTINGS.ReoptimizeInterval)
-
-            -- só reprocessa objetos novos
-            for obj, _ in pairs(processed) do
-                if not obj.Parent then
-                    processed[obj] = nil
-                end
-            end
-        end
-    end)
-end
-
---// NEW OBJECT HANDLER
-Workspace.DescendantAdded:Connect(function(obj)
-    task.defer(optimizeInstance, obj)
+--// LOOP DE DISTÂNCIA (NOVIDADE: DESATIVA O QUE ESTÁ LONGE)
+task.spawn(function()
+	while true do
+		task.wait(2)
+		local char = localPlayer.Character
+		if char and char.PrimaryPart then
+			local pos = char.PrimaryPart.Position
+			
+			for _, obj in ipairs(Workspace:GetDescendants()) do
+				if obj:IsA("Light") or obj:IsA("ParticleEmitter") then
+					local part = obj.Parent
+					if part and part:IsA("BasePart") then
+						local dist = (part.Position - pos).Magnitude
+						obj.Enabled = dist < SETTINGS.LightDistanceCutoff and currentMode ~= "LOW"
+					end
+				end
+			end
+		end
+	end
 end)
 
---// LOW LEVEL GRAPHICS
-local function applyLowGraphics()
-    pcall(function()
-        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-    end)
+--// EVENTOS E INICIALIZAÇÃO
+Workspace.DescendantAdded:Connect(function(obj)
+	task.defer(optimizeInstance, obj)
+end)
 
-    local terrain = Workspace:FindFirstChildOfClass("Terrain")
-    if terrain then
-        terrain.WaterWaveSize = 0
-        terrain.WaterWaveSpeed = 0
-        terrain.WaterReflectance = 0
-        terrain.WaterTransparency = 1
-    end
-end
-
---// START
 local function start()
-    optimizeLighting()
-    applyLowGraphics()
-    initialOptimize()
-    autoOptimize()
-
-    print("✅ FPS Optimizer PRO carregado")
+	applyGlobalSettings()
+	processBatch(Workspace:GetDescendants())
+	
+	-- Coletor de lixo para memória
+	task.spawn(function()
+		while true do
+			task.wait(SETTINGS.ReoptimizeInterval)
+			for obj, _ in pairs(processed) do
+				if not obj or not obj.Parent then
+					processed[obj] = nil
+				end
+			end
+		end
+	end)
+	
+	print("🚀 FPS BOOST EXTREME ATIVADO")
 end
 
 start()
