@@ -1,36 +1,40 @@
 --!strict
 
---// SERVIÇOS
-local Lighting = game:GetService("Lighting")
-local Workspace = game:GetService("Workspace")
+--// SERVICES
 local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
 local RunService = game:GetService("RunService")
-local SoundService = game:GetService("SoundService")
+
+local player = Players.LocalPlayer
 
 --// CONFIG
 local SETTINGS = {
-	FrameBudget = 0.002,
-	ReoptimizeInterval = 10,
-	MaxParticleRate = 5,
-	LightDistanceCutoff = 80,
-	SimulationDistance = 120,
+	FPS_CHECK = 1,
+	RECHECK = 2,
 
-	FPS_Thresholds = {
+	DISTANCE = {
+		LIGHT = 120,
+		RENDER = 200,
+		PHYSICS = 150
+	},
+
+	FPS = {
 		LOW = 30,
 		MEDIUM = 50
 	}
 }
 
 type Mode = "LOW" | "MEDIUM" | "HIGH"
-local currentMode: Mode = "HIGH"
-local lastMode: Mode = "HIGH"
+local mode: Mode = "HIGH"
 
+--// CACHE
+local lights = {}
+local particles = {}
+local parts = {}
+
+--// FPS TRACK (SUAVE)
 local fps = 60
-local processed = {} :: {[Instance]: Mode}
-local localPlayer = Players.LocalPlayer
-local camera = Workspace.CurrentCamera
-
---// FPS MONITOR
 task.spawn(function()
 	local last = tick()
 	local frames = 0
@@ -38,206 +42,128 @@ task.spawn(function()
 	RunService.Heartbeat:Connect(function()
 		frames += 1
 
-		if tick() - last >= 1 then
-			fps = frames
+		if tick() - last >= SETTINGS.FPS_CHECK then
+			local newFPS = frames
+			fps = math.floor((fps + newFPS) / 2)
+
 			frames = 0
 			last = tick()
 
-			lastMode = currentMode
-
-			if fps <= SETTINGS.FPS_Thresholds.LOW then
-				currentMode = "LOW"
-			elseif fps <= SETTINGS.FPS_Thresholds.MEDIUM then
-				currentMode = "MEDIUM"
+			if fps <= SETTINGS.FPS.LOW then
+				mode = "LOW"
+			elseif fps <= SETTINGS.FPS.MEDIUM then
+				mode = "MEDIUM"
 			else
-				currentMode = "HIGH"
-			end
-
-			-- força reotimização se o modo mudou
-			if currentMode ~= lastMode then
-				processed = {}
+				mode = "HIGH"
 			end
 		end
 	end)
 end)
 
 --// PROTEÇÃO
-local function isProtected(obj: Instance): boolean
-	if obj:IsA("LuaSourceContainer") then return true end
-	if localPlayer.Character and obj:IsDescendantOf(localPlayer.Character) then return true end
-	if obj:IsDescendantOf(localPlayer:WaitForChild("PlayerGui")) then return true end
+local function protected(obj: Instance): boolean
+	local char = player.Character
+	if char and obj:IsDescendantOf(char) then return true end
+	if obj:IsDescendantOf(player:WaitForChild("PlayerGui")) then return true end
 	return false
 end
 
---// CHECAR SE ESTÁ NA TELA
-local function isOnScreen(pos: Vector3): boolean
-	if not camera then return true end
-	local _, visible = camera:WorldToViewportPoint(pos)
-	return visible
-end
+--// REGISTRO
+local function register(obj: Instance)
+	if protected(obj) then return end
 
---// OTIMIZAÇÃO PRINCIPAL
-local function optimizeInstance(obj: Instance)
-	if not obj or isProtected(obj) then return end
-	
-	local prevMode = processed[obj]
-	if prevMode == currentMode then return end
-	processed[obj] = currentMode
-
-	-- BASEPART
 	if obj:IsA("BasePart") then
-		obj.CastShadow = false
+		table.insert(parts, obj)
 
-		if currentMode ~= "HIGH" then
-			obj.Material = Enum.Material.SmoothPlastic
-			obj.Reflectance = 0
-		end
-
-		if currentMode == "LOW" then
-			obj.CanTouch = false
-			obj.CanQuery = false
-		end
-
-	-- MESHES
-	elseif obj:IsA("SpecialMesh") then
-		if currentMode == "LOW" then
-			obj.TextureId = ""
-		end
-
-	-- TEXTURAS
-	elseif obj:IsA("Decal") or obj:IsA("Texture") then
-		obj.Transparency = (currentMode == "LOW") and 1 or obj.Transparency
-
-	-- PARTÍCULAS
-	elseif obj:IsA("ParticleEmitter") then
-		if currentMode == "LOW" then
-			obj.Enabled = false
-		elseif currentMode == "MEDIUM" then
-			obj.Rate = math.min(obj.Rate, SETTINGS.MaxParticleRate)
-		end
-
-	-- LUZ
 	elseif obj:IsA("Light") then
-		if currentMode == "LOW" then
-			obj.Enabled = false
-		elseif currentMode == "MEDIUM" then
-			obj.Shadows = false
-		end
+		table.insert(lights, obj)
 
-	-- SOM (MUITO IMPORTANTE)
-	elseif obj:IsA("Sound") then
-		if currentMode == "LOW" then
-			obj.Volume = obj.Volume * 0.3
-		end
-
-	-- ANIMAÇÕES
-	elseif obj:IsA("Animator") then
-		if currentMode == "LOW" then
-			for _, track in ipairs(obj:GetPlayingAnimationTracks()) do
-				track:AdjustSpeed(0.5)
-			end
-		end
+	elseif obj:IsA("ParticleEmitter") then
+		table.insert(particles, obj)
 	end
 end
 
---// GLOBAL
-local function applyGlobalSettings()
-	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-
-	Lighting.GlobalShadows = false
-	Lighting.FogEnd = 9e9
-	Lighting.Brightness = 1
-
-	for _, v in ipairs(Lighting:GetChildren()) do
-		if v:IsA("PostEffect") then
-			v.Enabled = false
-		end
-	end
-
-	local terrain = Workspace:FindFirstChildOfClass("Terrain")
-	if terrain then
-		terrain.WaterWaveSize = 0
-		terrain.WaterWaveSpeed = 0
-		terrain.WaterReflectance = 0
-		terrain.WaterTransparency = 1
-	end
-
-	-- SOM GLOBAL
-	SoundService.AmbientReverb = Enum.ReverbType.NoReverb
+for _, obj in ipairs(Workspace:GetDescendants()) do
+	register(obj)
 end
 
---// PROCESSAMENTO EM LOTES
-local function processBatch(list: {Instance})
-	local startTime = os.clock()
+Workspace.DescendantAdded:Connect(register)
 
-	for i, obj in ipairs(list) do
-		optimizeInstance(obj)
+--// GLOBAL CLEAN
+Lighting.GlobalShadows = false
+Lighting.FogEnd = 1e10
 
-		if i % 50 == 0 and (os.clock() - startTime) > SETTINGS.FrameBudget then
-			RunService.Heartbeat:Wait()
-			startTime = os.clock()
-		end
+for _, v in ipairs(Lighting:GetChildren()) do
+	if v:IsA("PostEffect") then
+		v.Enabled = false
 	end
 end
 
---// CULLING INTELIGENTE (DISTÂNCIA + VISÃO)
+--// LOOP PRINCIPAL INTELIGENTE
 task.spawn(function()
 	while true do
-		task.wait(1)
+		task.wait(SETTINGS.RECHECK)
 
-		local char = localPlayer.Character
+		local char = player.Character
 		if not char or not char.PrimaryPart then continue end
 
 		local pos = char.PrimaryPart.Position
 
-		for _, obj in ipairs(Workspace:GetDescendants()) do
-			if obj:IsA("BasePart") then
-				local dist = (obj.Position - pos).Magnitude
+		-- 💡 LUZES
+		for _, l in ipairs(lights) do
+			if l.Parent and l.Parent:IsA("BasePart") then
+				local d = (l.Parent.Position - pos).Magnitude
 
-				if dist > SETTINGS.SimulationDistance then
-					obj.LocalTransparencyModifier = 1
+				if mode == "LOW" then
+					l.Enabled = false
+
+				elseif mode == "MEDIUM" then
+					l.Enabled = d < SETTINGS.DISTANCE.LIGHT
+					l.Shadows = false
+
 				else
-					obj.LocalTransparencyModifier = 0
+					l.Enabled = true
 				end
 			end
+		end
 
-			if obj:IsA("Light") or obj:IsA("ParticleEmitter") then
-				local part = obj.Parent
-				if part and part:IsA("BasePart") then
-					local dist = (part.Position - pos).Magnitude
-					local visible = isOnScreen(part.Position)
+		-- ✨ PARTÍCULAS
+		for _, p in ipairs(particles) do
+			if mode == "LOW" then
+				p.Enabled = false
 
-					obj.Enabled = dist < SETTINGS.LightDistanceCutoff and visible and currentMode ~= "LOW"
+			elseif mode == "MEDIUM" then
+				p.Rate = math.min(p.Rate, 8)
+
+			else
+				p.Enabled = true
+			end
+		end
+
+		-- 📦 LOD + FÍSICA
+		for _, part in ipairs(parts) do
+			if part and part.Parent then
+				local d = (part.Position - pos).Magnitude
+
+				-- 🔥 LOD (DESAPARECE LONGE)
+				if d > SETTINGS.DISTANCE.RENDER then
+					part.LocalTransparencyModifier = 1
+
+				else
+					part.LocalTransparencyModifier = 0
 				end
+
+				-- ⚙️ FÍSICA
+				if mode == "LOW" and d > SETTINGS.DISTANCE.PHYSICS then
+					part.CanCollide = false
+					part.CanTouch = false
+				end
+
+				-- 🌑 SOMBRA
+				part.CastShadow = false
 			end
 		end
 	end
 end)
 
---// EVENTOS
-Workspace.DescendantAdded:Connect(function(obj)
-	task.defer(optimizeInstance, obj)
-end)
-
---// LIMPEZA
-task.spawn(function()
-	while true do
-		task.wait(SETTINGS.ReoptimizeInterval)
-
-		for obj, _ in pairs(processed) do
-			if not obj or not obj.Parent then
-				processed[obj] = nil
-			end
-		end
-	end
-end)
-
---// START
-local function start()
-	applyGlobalSettings()
-	processBatch(Workspace:GetDescendants())
-
-	print("🚀 FPS BOOST EXTREME+ ATIVO")
-end
-
-start()
+print("🚀 ULTRA PRO++ ATIVADO")
