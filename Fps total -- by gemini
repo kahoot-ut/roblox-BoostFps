@@ -155,7 +155,7 @@ task.spawn(function()
 
 				-- ⚙️ FÍSICA
 				if mode == "LOW" and d > SETTINGS.DISTANCE.PHYSICS then
-					part.CanCollide = false
+					part.CanCollide = true
 					part.CanTouch = false
 				end
 
