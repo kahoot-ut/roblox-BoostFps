@@ -5,13 +5,16 @@ local Lighting = game:GetService("Lighting")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 
---// CONFIGURAÇÕES
+--// CONFIG
 local SETTINGS = {
-	FrameBudget = 0.003, -- Menor para não causar stuttering
-	ReoptimizeInterval = 15,
-	MaxParticleRate = 5, -- Máximo de partículas por segundo no LOW
-	LightDistanceCutoff = 80, -- Distância para apagar luzes
+	FrameBudget = 0.002,
+	ReoptimizeInterval = 10,
+	MaxParticleRate = 5,
+	LightDistanceCutoff = 80,
+	SimulationDistance = 120,
+
 	FPS_Thresholds = {
 		LOW = 30,
 		MEDIUM = 50
@@ -20,21 +23,27 @@ local SETTINGS = {
 
 type Mode = "LOW" | "MEDIUM" | "HIGH"
 local currentMode: Mode = "HIGH"
-local fps = 60
-local processed = {} :: {[Instance]: boolean}
-local localPlayer = Players.LocalPlayer
+local lastMode: Mode = "HIGH"
 
---// FPS MONITOR & ADAPTATIVE QUALITY
+local fps = 60
+local processed = {} :: {[Instance]: Mode}
+local localPlayer = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+
+--// FPS MONITOR
 task.spawn(function()
 	local last = tick()
 	local frames = 0
 
 	RunService.Heartbeat:Connect(function()
 		frames += 1
+
 		if tick() - last >= 1 then
 			fps = frames
 			frames = 0
 			last = tick()
+
+			lastMode = currentMode
 
 			if fps <= SETTINGS.FPS_Thresholds.LOW then
 				currentMode = "LOW"
@@ -43,11 +52,16 @@ task.spawn(function()
 			else
 				currentMode = "HIGH"
 			end
+
+			-- força reotimização se o modo mudou
+			if currentMode ~= lastMode then
+				processed = {}
+			end
 		end
 	end)
 end)
 
---// PROTEÇÃO (EVITAR QUEBRAR O PERSONAGEM OU GUI)
+--// PROTEÇÃO
 local function isProtected(obj: Instance): boolean
 	if obj:IsA("LuaSourceContainer") then return true end
 	if localPlayer.Character and obj:IsDescendantOf(localPlayer.Character) then return true end
@@ -55,62 +69,88 @@ local function isProtected(obj: Instance): boolean
 	return false
 end
 
---// OTIMIZAÇÃO DE INSTÂNCIA (O CORAÇÃO DO SCRIPT)
-local function optimizeInstance(obj: Instance)
-	if not obj or processed[obj] or isProtected(obj) then return end
-	processed[obj] = true
+--// CHECAR SE ESTÁ NA TELA
+local function isOnScreen(pos: Vector3): boolean
+	if not camera then return true end
+	local _, visible = camera:WorldToViewportPoint(pos)
+	return visible
+end
 
-	-- Otimização de Mesh e Partes
+--// OTIMIZAÇÃO PRINCIPAL
+local function optimizeInstance(obj: Instance)
+	if not obj or isProtected(obj) then return end
+	
+	local prevMode = processed[obj]
+	if prevMode == currentMode then return end
+	processed[obj] = currentMode
+
+	-- BASEPART
 	if obj:IsA("BasePart") then
 		obj.CastShadow = false
+
 		if currentMode ~= "HIGH" then
-			obj.Reflectance = 0
 			obj.Material = Enum.Material.SmoothPlastic
-		end
-		
-		-- Reduz colisões desnecessárias que pesam no processamento de física
-		if currentMode == "LOW" and not obj:IsA("MeshPart") then
-			obj.CanTouch = false
+			obj.Reflectance = 0
 		end
 
-	-- Otimização de Efeitos Visual (Partículas são as vilãs do FPS)
+		if currentMode == "LOW" then
+			obj.CanTouch = false
+			obj.CanQuery = false
+		end
+
+	-- MESHES
+	elseif obj:IsA("SpecialMesh") then
+		if currentMode == "LOW" then
+			obj.TextureId = ""
+		end
+
+	-- TEXTURAS
+	elseif obj:IsA("Decal") or obj:IsA("Texture") then
+		obj.Transparency = (currentMode == "LOW") and 1 or obj.Transparency
+
+	-- PARTÍCULAS
 	elseif obj:IsA("ParticleEmitter") then
 		if currentMode == "LOW" then
-			obj.Enabled = false -- Desativa no extremo
+			obj.Enabled = false
 		elseif currentMode == "MEDIUM" then
 			obj.Rate = math.min(obj.Rate, SETTINGS.MaxParticleRate)
 		end
-		
-	elseif obj:IsA("Explosion") then
-		obj.Visible = false
-		obj.BlastPressure = 0 -- Remove lag de física de explosão
 
-	elseif obj:IsA("Decal") or obj:IsA("Texture") then
-		if currentMode == "LOW" then
-			obj.Transparency = 1 -- Oculta para poupar VRAM
-		end
-
-	-- Otimização de Iluminação Dinâmica
+	-- LUZ
 	elseif obj:IsA("Light") then
 		if currentMode == "LOW" then
 			obj.Enabled = false
 		elseif currentMode == "MEDIUM" then
 			obj.Shadows = false
 		end
+
+	-- SOM (MUITO IMPORTANTE)
+	elseif obj:IsA("Sound") then
+		if currentMode == "LOW" then
+			obj.Volume = obj.Volume * 0.3
+		end
+
+	-- ANIMAÇÕES
+	elseif obj:IsA("Animator") then
+		if currentMode == "LOW" then
+			for _, track in ipairs(obj:GetPlayingAnimationTracks()) do
+				track:AdjustSpeed(0.5)
+			end
+		end
 	end
 end
 
---// LIMPEZA GLOBAL DE AMBIENTE
+--// GLOBAL
 local function applyGlobalSettings()
 	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-	
+
 	Lighting.GlobalShadows = false
 	Lighting.FogEnd = 9e9
 	Lighting.Brightness = 1
-	
-	for _, effect in ipairs(Lighting:GetChildren()) do
-		if effect:IsA("PostEffect") then
-			effect.Enabled = false
+
+	for _, v in ipairs(Lighting:GetChildren()) do
+		if v:IsA("PostEffect") then
+			v.Enabled = false
 		end
 	end
 
@@ -121,14 +161,18 @@ local function applyGlobalSettings()
 		terrain.WaterReflectance = 0
 		terrain.WaterTransparency = 1
 	end
+
+	-- SOM GLOBAL
+	SoundService.AmbientReverb = Enum.ReverbType.NoReverb
 end
 
---// PROCESSAMENTO EM LOTES (EVITA CONGELAR A TELA)
-local function processBatch(list: {any})
+--// PROCESSAMENTO EM LOTES
+local function processBatch(list: {Instance})
 	local startTime = os.clock()
+
 	for i, obj in ipairs(list) do
 		optimizeInstance(obj)
-		
+
 		if i % 50 == 0 and (os.clock() - startTime) > SETTINGS.FrameBudget then
 			RunService.Heartbeat:Wait()
 			startTime = os.clock()
@@ -136,49 +180,64 @@ local function processBatch(list: {any})
 	end
 end
 
---// LOOP DE DISTÂNCIA (NOVIDADE: DESATIVA O QUE ESTÁ LONGE)
+--// CULLING INTELIGENTE (DISTÂNCIA + VISÃO)
 task.spawn(function()
 	while true do
-		task.wait(2)
+		task.wait(1)
+
 		local char = localPlayer.Character
-		if char and char.PrimaryPart then
-			local pos = char.PrimaryPart.Position
-			
-			for _, obj in ipairs(Workspace:GetDescendants()) do
-				if obj:IsA("Light") or obj:IsA("ParticleEmitter") then
-					local part = obj.Parent
-					if part and part:IsA("BasePart") then
-						local dist = (part.Position - pos).Magnitude
-						obj.Enabled = dist < SETTINGS.LightDistanceCutoff and currentMode ~= "LOW"
-					end
+		if not char or not char.PrimaryPart then continue end
+
+		local pos = char.PrimaryPart.Position
+
+		for _, obj in ipairs(Workspace:GetDescendants()) do
+			if obj:IsA("BasePart") then
+				local dist = (obj.Position - pos).Magnitude
+
+				if dist > SETTINGS.SimulationDistance then
+					obj.LocalTransparencyModifier = 1
+				else
+					obj.LocalTransparencyModifier = 0
+				end
+			end
+
+			if obj:IsA("Light") or obj:IsA("ParticleEmitter") then
+				local part = obj.Parent
+				if part and part:IsA("BasePart") then
+					local dist = (part.Position - pos).Magnitude
+					local visible = isOnScreen(part.Position)
+
+					obj.Enabled = dist < SETTINGS.LightDistanceCutoff and visible and currentMode ~= "LOW"
 				end
 			end
 		end
 	end
 end)
 
---// EVENTOS E INICIALIZAÇÃO
+--// EVENTOS
 Workspace.DescendantAdded:Connect(function(obj)
 	task.defer(optimizeInstance, obj)
 end)
 
+--// LIMPEZA
+task.spawn(function()
+	while true do
+		task.wait(SETTINGS.ReoptimizeInterval)
+
+		for obj, _ in pairs(processed) do
+			if not obj or not obj.Parent then
+				processed[obj] = nil
+			end
+		end
+	end
+end)
+
+--// START
 local function start()
 	applyGlobalSettings()
 	processBatch(Workspace:GetDescendants())
-	
-	-- Coletor de lixo para memória
-	task.spawn(function()
-		while true do
-			task.wait(SETTINGS.ReoptimizeInterval)
-			for obj, _ in pairs(processed) do
-				if not obj or not obj.Parent then
-					processed[obj] = nil
-				end
-			end
-		end
-	end)
-	
-	print("🚀 FPS BOOST EXTREME ATIVADO")
+
+	print("🚀 FPS BOOST EXTREME+ ATIVO")
 end
 
 start()
