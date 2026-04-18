@@ -167,3 +167,152 @@ task.spawn(function()
 end)
 
 print("🚀 ULTRA PRO++ ATIVADO")
+
+--// EXTRA CACHE
+local decals = {}
+local textures = {}
+local sounds = {}
+local guis = {}
+local meshes = {}
+local constraints = {}
+
+--// REGISTRO EXTRA
+local function registerExtra(obj: Instance)
+	if protected(obj) then return end
+
+	if obj:IsA("Decal") then
+		table.insert(decals, obj)
+
+	elseif obj:IsA("Texture") then
+		table.insert(textures, obj)
+
+	elseif obj:IsA("Sound") then
+		table.insert(sounds, obj)
+
+	elseif obj:IsA("BillboardGui") or obj:IsA("SurfaceGui") then
+		table.insert(guis, obj)
+
+	elseif obj:IsA("MeshPart") then
+		table.insert(meshes, obj)
+
+	elseif obj:IsA("Constraint") then
+		table.insert(constraints, obj)
+	end
+end
+
+for _, obj in ipairs(Workspace:GetDescendants()) do
+	registerExtra(obj)
+end
+
+Workspace.DescendantAdded:Connect(registerExtra)
+
+--// OTIMIZAÇÕES GLOBAIS PESADAS
+Workspace.StreamingEnabled = true
+Workspace.StreamingMinRadius = 64
+Workspace.StreamingTargetRadius = 128
+
+pcall(function()
+	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+end)
+
+-- TERRAIN
+pcall(function()
+	Workspace.Terrain.WaterWaveSize = 0
+	Workspace.Terrain.WaterWaveSpeed = 0
+	Workspace.Terrain.WaterReflectance = 0
+	Workspace.Terrain.WaterTransparency = 1
+end)
+
+--// LOOP EXTRA ULTRA
+task.spawn(function()
+	while true do
+		task.wait(SETTINGS.RECHECK)
+
+		local char = player.Character
+		if not char or not char.PrimaryPart then continue end
+
+		local pos = char.PrimaryPart.Position
+
+		-- 🖼️ DECALS / TEXTURES
+		for _, d in ipairs(decals) do
+			if d.Parent and d.Parent:IsA("BasePart") then
+				local dist = (d.Parent.Position - pos).Magnitude
+
+				if mode == "LOW" or dist > SETTINGS.DISTANCE.RENDER then
+					d.Transparency = 1
+				else
+					d.Transparency = 0
+				end
+			end
+		end
+
+		for _, t in ipairs(textures) do
+			if t.Parent and t.Parent:IsA("BasePart") then
+				local dist = (t.Parent.Position - pos).Magnitude
+
+				if mode ~= "HIGH" then
+					t.Transparency = 1
+				else
+					t.Transparency = 0
+				end
+			end
+		end
+
+		-- 🔊 SONS
+		for _, s in ipairs(sounds) do
+			if s.Parent and s.Parent:IsA("BasePart") then
+				local dist = (s.Parent.Position - pos).Magnitude
+
+				if dist > SETTINGS.DISTANCE.RENDER then
+					s.Volume = 0
+				else
+					s.Volume = 1
+				end
+			end
+		end
+
+		-- 🧾 GUIS 3D
+		for _, g in ipairs(guis) do
+			if g.Parent and g.Parent:IsA("BasePart") then
+				local dist = (g.Parent.Position - pos).Magnitude
+
+				g.Enabled = dist < SETTINGS.DISTANCE.RENDER
+			end
+		end
+
+		-- 🔺 MESH OTIMIZAÇÃO
+		for _, m in ipairs(meshes) do
+			if mode == "LOW" then
+				m.RenderFidelity = Enum.RenderFidelity.Performance
+			elseif mode == "MEDIUM" then
+				m.RenderFidelity = Enum.RenderFidelity.Automatic
+			end
+		end
+
+		-- ⚙️ CONSTRAINTS
+		for _, c in ipairs(constraints) do
+			if mode == "LOW" then
+				c.Enabled = false
+			else
+				c.Enabled = true
+			end
+		end
+
+		-- 📦 PARTES EXTRA OTIMIZAÇÃO
+		for _, part in ipairs(parts) do
+			if part and part.Parent then
+				-- MATERIAL SIMPLES
+				if mode ~= "HIGH" then
+					part.Material = Enum.Material.SmoothPlastic
+					part.Reflectance = 0
+				end
+
+				-- REMOVE VELOCIDADE (FÍSICA)
+				if mode == "LOW" then
+					part.AssemblyLinearVelocity = Vector3.zero
+					part.AssemblyAngularVelocity = Vector3.zero
+				end
+			end
+		end
+	end
+end)
