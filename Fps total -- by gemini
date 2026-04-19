@@ -8,311 +8,198 @@ local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 
---// CONFIG
+--// CONFIGURAÇÕES OTIMIZADAS
 local SETTINGS = {
 	FPS_CHECK = 1,
-	RECHECK = 2,
-
+	RECHECK = 2, -- Tempo entre varreduras
+	
 	DISTANCE = {
-		LIGHT = 120,
-		RENDER = 200,
-		PHYSICS = 150
+		LIGHT = 100,
+		RENDER = 180,
+		PHYSICS = 120,
 	},
 
 	FPS = {
-		LOW = 30,
-		MEDIUM = 50
+		LOW = 35,
+		MEDIUM = 55
 	}
 }
 
+-- Variáveis de controle
 type Mode = "LOW" | "MEDIUM" | "HIGH"
 local mode: Mode = "HIGH"
-
---// CACHE
-local lights = {}
-local particles = {}
-local parts = {}
-
---// FPS TRACK (SUAVE)
 local fps = 60
-task.spawn(function()
-	local last = tick()
-	local frames = 0
 
-	RunService.Heartbeat:Connect(function()
-		frames += 1
+--// CACHES (USANDO TABELAS PARA OBJETOS ESPECÍFICOS)
+local database = {
+	parts = {} :: {BasePart},
+	lights = {} :: {Light},
+	particles = {} :: {ParticleEmitter},
+	decals = {} :: {Decal},
+	textures = {} :: {Texture},
+	sounds = {} :: {Sound},
+	guis = {} :: {Instance}, -- Billboard ou Surface
+	meshes = {} :: {MeshPart},
+	constraints = {} :: {Constraint}
+}
 
-		if tick() - last >= SETTINGS.FPS_CHECK then
-			local newFPS = frames
-			fps = math.floor((fps + newFPS) / 2)
+--// FUNÇÃO DE LIMPEZA (EVITA MEMORY LEAK)
+local function unregister(obj: Instance, tbl: {any})
+	local index = table.find(tbl, obj)
+	if index then
+		table.remove(tbl, index)
+	end
+end
 
-			frames = 0
-			last = tick()
-
-			if fps <= SETTINGS.FPS.LOW then
-				mode = "LOW"
-			elseif fps <= SETTINGS.FPS.MEDIUM then
-				mode = "MEDIUM"
-			else
-				mode = "HIGH"
-			end
-		end
-	end)
-end)
-
---// PROTEÇÃO
-local function protected(obj: Instance): boolean
+--// PROTEÇÃO (NÃO AFETAR O PLAYER OU INTERFACE)
+local function isProtected(obj: Instance): boolean
 	local char = player.Character
 	if char and obj:IsDescendantOf(char) then return true end
 	if obj:IsDescendantOf(player:WaitForChild("PlayerGui")) then return true end
 	return false
 end
 
---// REGISTRO
+--// REGISTRO DINÂMICO
 local function register(obj: Instance)
-	if protected(obj) then return end
+	if isProtected(obj) then return end
 
-	if obj:IsA("BasePart") then
-		table.insert(parts, obj)
+	local targetTable = nil
+	
+	if obj:IsA("MeshPart") then targetTable = database.meshes
+	elseif obj:IsA("BasePart") then targetTable = database.parts
+	elseif obj:IsA("Light") then targetTable = database.lights
+	elseif obj:IsA("ParticleEmitter") then targetTable = database.particles
+	elseif obj:IsA("Decal") then targetTable = database.decals
+	elseif obj:IsA("Texture") then targetTable = database.textures
+	elseif obj:IsA("Sound") then targetTable = database.sounds
+	elseif obj:IsA("BillboardGui") or obj:IsA("SurfaceGui") then targetTable = database.guis
+	elseif obj:IsA("Constraint") then targetTable = database.constraints
+	end
 
-	elseif obj:IsA("Light") then
-		table.insert(lights, obj)
-
-	elseif obj:IsA("ParticleEmitter") then
-		table.insert(particles, obj)
+	if targetTable then
+		table.insert(targetTable, obj)
+		-- Limpa da tabela quando o objeto for destruído
+		obj.Destroying:Once(function()
+			unregister(obj, targetTable)
+		end)
 	end
 end
 
+-- Inicializar objetos existentes
 for _, obj in ipairs(Workspace:GetDescendants()) do
 	register(obj)
 end
-
 Workspace.DescendantAdded:Connect(register)
 
---// GLOBAL CLEAN
+--// MONITOR DE FPS (MÉDIA MÓVEL)
+task.spawn(function()
+	local last = tick()
+	local frames = 0
+
+	RunService.Heartbeat:Connect(function()
+		frames += 1
+		local now = tick()
+		
+		if now - last >= SETTINGS.FPS_CHECK then
+			fps = math.floor((fps + (frames / (now - last))) / 2)
+			frames = 0
+			last = now
+
+			if fps <= SETTINGS.FPS.LOW then mode = "LOW"
+			elseif fps <= SETTINGS.FPS.MEDIUM then mode = "MEDIUM"
+			else mode = "HIGH" end
+		end
+	end)
+end)
+
+--// CONFIGURAÇÕES GLOBAIS (UMA VEZ)
 Lighting.GlobalShadows = false
 Lighting.FogEnd = 1e10
-
 for _, v in ipairs(Lighting:GetChildren()) do
-	if v:IsA("PostEffect") then
-		v.Enabled = false
-	end
+	if v:IsA("PostEffect") then v.Enabled = false end
 end
 
---// LOOP PRINCIPAL INTELIGENTE
-task.spawn(function()
-	while true do
-		task.wait(SETTINGS.RECHECK)
-
-		local char = player.Character
-		if not char or not char.PrimaryPart then continue end
-
-		local pos = char.PrimaryPart.Position
-
-		-- 💡 LUZES
-		for _, l in ipairs(lights) do
-			if l.Parent and l.Parent:IsA("BasePart") then
-				local d = (l.Parent.Position - pos).Magnitude
-
-				if mode == "LOW" then
-					l.Enabled = false
-
-				elseif mode == "MEDIUM" then
-					l.Enabled = d < SETTINGS.DISTANCE.LIGHT
-					l.Shadows = false
-
-				else
-					l.Enabled = true
-				end
-			end
-		end
-
-		-- ✨ PARTÍCULAS
-		for _, p in ipairs(particles) do
-			if mode == "LOW" then
-				p.Enabled = false
-
-			elseif mode == "MEDIUM" then
-				p.Rate = math.min(p.Rate, 8)
-
-			else
-				p.Enabled = true
-			end
-		end
-
-		-- 📦 LOD + FÍSICA
-		for _, part in ipairs(parts) do
-			if part and part.Parent then
-				local d = (part.Position - pos).Magnitude
-
-				-- 🔥 LOD (DESAPARECE LONGE)
-				if d > SETTINGS.DISTANCE.RENDER then
-					part.LocalTransparencyModifier = 1
-
-				else
-					part.LocalTransparencyModifier = 0
-				end
-
-				-- ⚙️ FÍSICA
-				if mode == "LOW" and d > SETTINGS.DISTANCE.PHYSICS then
-					part.CanCollide = true
-					part.CanTouch = false
-				end
-
-				-- 🌑 SOMBRA
-				part.CastShadow = false
-			end
-		end
-	end
-end)
-
-print("🚀 ULTRA PRO++ ATIVADO")
-
---// EXTRA CACHE
-local decals = {}
-local textures = {}
-local sounds = {}
-local guis = {}
-local meshes = {}
-local constraints = {}
-
---// REGISTRO EXTRA
-local function registerExtra(obj: Instance)
-	if protected(obj) then return end
-
-	if obj:IsA("Decal") then
-		table.insert(decals, obj)
-
-	elseif obj:IsA("Texture") then
-		table.insert(textures, obj)
-
-	elseif obj:IsA("Sound") then
-		table.insert(sounds, obj)
-
-	elseif obj:IsA("BillboardGui") or obj:IsA("SurfaceGui") then
-		table.insert(guis, obj)
-
-	elseif obj:IsA("MeshPart") then
-		table.insert(meshes, obj)
-
-	elseif obj:IsA("Constraint") then
-		table.insert(constraints, obj)
-	end
-end
-
-for _, obj in ipairs(Workspace:GetDescendants()) do
-	registerExtra(obj)
-end
-
-Workspace.DescendantAdded:Connect(registerExtra)
-
---// OTIMIZAÇÕES GLOBAIS PESADAS
 Workspace.StreamingEnabled = true
-Workspace.StreamingMinRadius = 64
-Workspace.StreamingTargetRadius = 128
-
 pcall(function()
 	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-end)
-
--- TERRAIN
-pcall(function()
 	Workspace.Terrain.WaterWaveSize = 0
 	Workspace.Terrain.WaterWaveSpeed = 0
 	Workspace.Terrain.WaterReflectance = 0
-	Workspace.Terrain.WaterTransparency = 1
 end)
 
---// LOOP EXTRA ULTRA
+--// LOOP PRINCIPAL DE OTIMIZAÇÃO (CUSTO DE CPU REDUZIDO)
 task.spawn(function()
 	while true do
-		task.wait(SETTINGS.RECHECK)
-
+		task.wait(mode == "LOW" and SETTINGS.RECHECK * 2 or SETTINGS.RECHECK)
+		
 		local char = player.Character
-		if not char or not char.PrimaryPart then continue end
+		local root = char and char.PrimaryPart
+		if not root then continue end
+		
+		local pos = root.Position
+		local renderDistSq = SETTINGS.DISTANCE.RENDER ^ 2
+		local lightDistSq = SETTINGS.DISTANCE.LIGHT ^ 2
 
-		local pos = char.PrimaryPart.Position
-
-		-- 🖼️ DECALS / TEXTURES
-		for _, d in ipairs(decals) do
-			if d.Parent and d.Parent:IsA("BasePart") then
-				local dist = (d.Parent.Position - pos).Magnitude
-
-				if mode == "LOW" or dist > SETTINGS.DISTANCE.RENDER then
-					d.Transparency = 1
-				else
-					d.Transparency = 0
-				end
+		-- Otimizar Luzes
+		for _, l in ipairs(database.lights) do
+			local parent = l.Parent
+			if parent and parent:IsA("BasePart") then
+				local dSq = (parent.Position - pos).SqrMagnitude
+				l.Enabled = (mode ~= "LOW") and (dSq < lightDistSq)
+				l.Shadows = false
 			end
 		end
 
-		for _, t in ipairs(textures) do
-			if t.Parent and t.Parent:IsA("BasePart") then
-				local dist = (t.Parent.Position - pos).Magnitude
+		-- Otimizar Partículas
+		for _, p in ipairs(database.particles) do
+			if mode == "LOW" then p.Enabled = false
+			elseif mode == "MEDIUM" then p.Rate = 5
+			else p.Enabled = true end
+		end
 
-				if mode ~= "HIGH" then
-					t.Transparency = 1
-				else
-					t.Transparency = 0
-				end
+		-- Otimizar Meshes e Partes (LOD e Física)
+		for _, m in ipairs(database.meshes) do
+			m.RenderFidelity = (mode == "LOW") and Enum.RenderFidelity.Performance or Enum.RenderFidelity.Automatic
+		end
+
+		for _, part in ipairs(database.parts) do
+			local dSq = (part.Position - pos).SqrMagnitude
+			
+			-- Transparência Local (LOD)
+			part.LocalTransparencyModifier = (dSq > renderDistSq) and 1 or 0
+			part.CastShadow = false
+			
+			if mode ~= "HIGH" then
+				part.Material = Enum.Material.SmoothPlastic
+				part.Reflectance = 0
+			end
+			
+			if mode == "LOW" and dSq > (SETTINGS.DISTANCE.PHYSICS ^ 2) then
+				part.CanTouch = false
+				part.AssemblyLinearVelocity = Vector3.zero
 			end
 		end
 
-		-- 🔊 SONS
-		for _, s in ipairs(sounds) do
-			if s.Parent and s.Parent:IsA("BasePart") then
-				local dist = (s.Parent.Position - pos).Magnitude
+		-- Otimizar Texturas e Decals
+		local showDecals = mode == "HIGH"
+		for _, d in ipairs(database.decals) do d.Transparency = showDecals and 0 or 1 end
+		for _, t in ipairs(database.textures) do t.Transparency = showDecals and 0 or 1 end
 
-				if dist > SETTINGS.DISTANCE.RENDER then
-					s.Volume = 0
-				else
-					s.Volume = 1
-				end
+		-- Otimizar Interface 3D e Sons
+		for _, g in ipairs(database.guis) do
+			local p = g.Parent
+			if p and p:IsA("BasePart") then
+				(g :: any).Enabled = (p.Position - pos).SqrMagnitude < renderDistSq
 			end
 		end
-
-		-- 🧾 GUIS 3D
-		for _, g in ipairs(guis) do
-			if g.Parent and g.Parent:IsA("BasePart") then
-				local dist = (g.Parent.Position - pos).Magnitude
-
-				g.Enabled = dist < SETTINGS.DISTANCE.RENDER
-			end
-		end
-
-		-- 🔺 MESH OTIMIZAÇÃO
-		for _, m in ipairs(meshes) do
-			if mode == "LOW" then
-				m.RenderFidelity = Enum.RenderFidelity.Performance
-			elseif mode == "MEDIUM" then
-				m.RenderFidelity = Enum.RenderFidelity.Automatic
-			end
-		end
-
-		-- ⚙️ CONSTRAINTS
-		for _, c in ipairs(constraints) do
-			if mode == "LOW" then
-				c.Enabled = false
-			else
-				c.Enabled = true
-			end
-		end
-
-		-- 📦 PARTES EXTRA OTIMIZAÇÃO
-		for _, part in ipairs(parts) do
-			if part and part.Parent then
-				-- MATERIAL SIMPLES
-				if mode ~= "HIGH" then
-					part.Material = Enum.Material.SmoothPlastic
-					part.Reflectance = 0
-				end
-
-				-- REMOVE VELOCIDADE (FÍSICA)
-				if mode == "LOW" then
-					part.AssemblyLinearVelocity = Vector3.zero
-					part.AssemblyAngularVelocity = Vector3.zero
-				end
+		
+		for _, s in ipairs(database.sounds) do
+			local p = s.Parent
+			if p and p:IsA("BasePart") then
+				s.Volume = (p.Position - pos).SqrMagnitude < renderDistSq and 1 or 0
 			end
 		end
 	end
 end)
+
+print("🚀 ULTRA OTIMIZADOR V2 ATIVADO")
