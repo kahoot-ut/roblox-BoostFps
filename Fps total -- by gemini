@@ -8,50 +8,31 @@ local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 
---// CONFIGURAÇÕES OTIMIZADAS
+--// CONFIG
 local SETTINGS = {
-	FPS_CHECK = 1,
-	RECHECK = 2, -- Tempo entre varreduras
-	
-	DISTANCE = {
-		LIGHT = 100,
+	RECHECK = 1.5,
+	BATCH_SIZE = 120, -- Quantos objetos processar por frame
+
+	DIST = {
 		RENDER = 180,
-		PHYSICS = 120,
+		LIGHT = 100,
+		PHYSICS = 120
 	},
 
 	FPS = {
 		LOW = 35,
-		MEDIUM = 55
+		MED = 55
 	}
 }
 
--- Variáveis de controle
 type Mode = "LOW" | "MEDIUM" | "HIGH"
 local mode: Mode = "HIGH"
 local fps = 60
 
---// CACHES (USANDO TABELAS PARA OBJETOS ESPECÍFICOS)
-local database = {
-	parts = {} :: {BasePart},
-	lights = {} :: {Light},
-	particles = {} :: {ParticleEmitter},
-	decals = {} :: {Decal},
-	textures = {} :: {Texture},
-	sounds = {} :: {Sound},
-	guis = {} :: {Instance}, -- Billboard ou Surface
-	meshes = {} :: {MeshPart},
-	constraints = {} :: {Constraint}
-}
+--// CACHE ÚNICO (mais rápido que várias tabelas)
+local objects: {Instance} = {}
 
---// FUNÇÃO DE LIMPEZA (EVITA MEMORY LEAK)
-local function unregister(obj: Instance, tbl: {any})
-	local index = table.find(tbl, obj)
-	if index then
-		table.remove(tbl, index)
-	end
-end
-
---// PROTEÇÃO (NÃO AFETAR O PLAYER OU INTERFACE)
+--// REGISTRO INTELIGENTE
 local function isProtected(obj: Instance): boolean
 	local char = player.Character
 	if char and obj:IsDescendantOf(char) then return true end
@@ -59,39 +40,27 @@ local function isProtected(obj: Instance): boolean
 	return false
 end
 
---// REGISTRO DINÂMICO
 local function register(obj: Instance)
 	if isProtected(obj) then return end
+	table.insert(objects, obj)
 
-	local targetTable = nil
-	
-	if obj:IsA("MeshPart") then targetTable = database.meshes
-	elseif obj:IsA("BasePart") then targetTable = database.parts
-	elseif obj:IsA("Light") then targetTable = database.lights
-	elseif obj:IsA("ParticleEmitter") then targetTable = database.particles
-	elseif obj:IsA("Decal") then targetTable = database.decals
-	elseif obj:IsA("Texture") then targetTable = database.textures
-	elseif obj:IsA("Sound") then targetTable = database.sounds
-	elseif obj:IsA("BillboardGui") or obj:IsA("SurfaceGui") then targetTable = database.guis
-	elseif obj:IsA("Constraint") then targetTable = database.constraints
-	end
-
-	if targetTable then
-		table.insert(targetTable, obj)
-		-- Limpa da tabela quando o objeto for destruído
-		obj.Destroying:Once(function()
-			unregister(obj, targetTable)
-		end)
-	end
+	obj.Destroying:Once(function()
+		local i = table.find(objects, obj)
+		if i then table.remove(objects, i) end
+	end)
 end
 
--- Inicializar objetos existentes
-for _, obj in ipairs(Workspace:GetDescendants()) do
-	register(obj)
-end
+-- Inicialização leve (sem travar)
+task.spawn(function()
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		register(obj)
+		task.wait() -- evita freeze
+	end
+end)
+
 Workspace.DescendantAdded:Connect(register)
 
---// MONITOR DE FPS (MÉDIA MÓVEL)
+--// FPS TRACKER (mais leve)
 task.spawn(function()
 	local last = tick()
 	local frames = 0
@@ -99,395 +68,148 @@ task.spawn(function()
 	RunService.Heartbeat:Connect(function()
 		frames += 1
 		local now = tick()
-		
-		if now - last >= SETTINGS.FPS_CHECK then
-			fps = math.floor((fps + (frames / (now - last))) / 2)
+
+		if now - last >= 1 then
+			fps = frames
 			frames = 0
 			last = now
 
-			if fps <= SETTINGS.FPS.LOW then mode = "LOW"
-			elseif fps <= SETTINGS.FPS.MEDIUM then mode = "MEDIUM"
-			else mode = "HIGH" end
+			if fps <= SETTINGS.FPS.LOW then
+				mode = "LOW"
+			elseif fps <= SETTINGS.FPS.MED then
+				mode = "MEDIUM"
+			else
+				mode = "HIGH"
+			end
 		end
 	end)
 end)
 
---// CONFIGURAÇÕES GLOBAIS (UMA VEZ)
+--// OTIMIZAÇÃO GLOBAL (UMA VEZ)
 Lighting.GlobalShadows = false
-Lighting.FogEnd = 1e10
-for _, v in ipairs(Lighting:GetChildren()) do
-	if v:IsA("PostEffect") then v.Enabled = false end
-end
+Lighting.FogEnd = 1e9
 
-Workspace.StreamingEnabled = true
 pcall(function()
 	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-	Workspace.Terrain.WaterWaveSize = 0
-	Workspace.Terrain.WaterWaveSpeed = 0
-	Workspace.Terrain.WaterReflectance = 0
 end)
 
---// LOOP PRINCIPAL DE OTIMIZAÇÃO (CUSTO DE CPU REDUZIDO)
+--// LOOP PRINCIPAL ULTRA OTIMIZADO
 task.spawn(function()
+	local index = 1
+
 	while true do
-		task.wait(mode == "LOW" and SETTINGS.RECHECK * 2 or SETTINGS.RECHECK)
-		
+		task.wait(SETTINGS.RECHECK)
+
 		local char = player.Character
 		local root = char and char.PrimaryPart
 		if not root then continue end
-		
+
 		local pos = root.Position
-		local renderDistSq = SETTINGS.DISTANCE.RENDER ^ 2
-		local lightDistSq = SETTINGS.DISTANCE.LIGHT ^ 2
 
-		-- Otimizar Luzes
-		for _, l in ipairs(database.lights) do
-			local parent = l.Parent
-			if parent and parent:IsA("BasePart") then
-				local dSq = (parent.Position - pos).SqrMagnitude
-				l.Enabled = (mode ~= "LOW") and (dSq < lightDistSq)
-				l.Shadows = false
-			end
-		end
+		local processed = 0
 
-		-- Otimizar Partículas
-		for _, p in ipairs(database.particles) do
-			if mode == "LOW" then p.Enabled = false
-			elseif mode == "MEDIUM" then p.Rate = 5
-			else p.Enabled = true end
-		end
+		while processed < SETTINGS.BATCH_SIZE and index <= #objects do
+			local obj = objects[index]
+			index += 1
+			processed += 1
 
-		-- Otimizar Meshes e Partes (LOD e Física)
-		for _, m in ipairs(database.meshes) do
-			m.RenderFidelity = (mode == "LOW") and Enum.RenderFidelity.Performance or Enum.RenderFidelity.Automatic
-		end
+			if not obj or not obj.Parent then continue end
 
-		for _, part in ipairs(database.parts) do
-			local dSq = (part.Position - pos).SqrMagnitude
-			
-			-- Transparência Local (LOD)
-			part.LocalTransparencyModifier = (dSq > renderDistSq) and 1 or 0
-			part.CastShadow = false
-			
-			if mode ~= "HIGH" then
-				part.Material = Enum.Material.SmoothPlastic
-				part.Reflectance = 0
-			end
-			
-			if mode == "LOW" and dSq > (SETTINGS.DISTANCE.PHYSICS ^ 2) then
-				part.CanTouch = false
-				part.AssemblyLinearVelocity = Vector3.zero
-			end
-		end
+			--// BASEPART (principal custo)
+			if obj:IsA("BasePart") then
+				local distSq = (obj.Position - pos).Magnitude
 
-		-- Otimizar Texturas e Decals
-		local showDecals = mode == "HIGH"
-		for _, d in ipairs(database.decals) do d.Transparency = showDecals and 0 or 1 end
-		for _, t in ipairs(database.textures) do t.Transparency = showDecals and 0 or 1 end
-
-		-- Otimizar Interface 3D e Sons
-		for _, g in ipairs(database.guis) do
-			local p = g.Parent
-			if p and p:IsA("BasePart") then
-				(g :: any).Enabled = (p.Position - pos).SqrMagnitude < renderDistSq
-			end
-		end
-		
-		for _, s in ipairs(database.sounds) do
-			local p = s.Parent
-			if p and p:IsA("BasePart") then
-				s.Volume = (p.Position - pos).SqrMagnitude < renderDistSq and 1 or 0
-			end
-		end
-	end
-end)
-
-print("🚀 ULTRA OTIMIZADOR V2 ATIVADO")
-
---!strict
-
---// SERVICES
-local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
-local Debris = game:GetService("Debris")
-
---// CONFIGURAÇÕES DE LIMPEZA
-local CLEAN_SETTINGS = {
-	MAX_RECORDS = 200,      -- Máximo de registros no log interno
-	CLEAN_INTERVAL = 10,    -- Limpeza pesada a cada 10 segundos
-	TRASH_DIST = 300,       -- Distância para remover itens sem utilidade
-}
-
---// FILTROS DE LIXO
-local TRASH_NAMES = {
-	"Effect", "Particle", "Bullet", "Shell", "Blood", 
-	"Debris", "Fragment", "Part", "Handle"
-}
-
---// FUNÇÕES AUXILIARES
-local function isPhysicsDead(part: BasePart): boolean
-	-- Verifica se a peça caiu no vácuo ou está parada longe demais
-	return part.Position.Y < -100 or (part.AssemblyLinearVelocity.Magnitude < 0.1)
-end
-
-local function cleanGarbage()
-	local count = 0
-	
-	-- 1. Limpeza de Peças Soltas no Mundo
-	for _, obj in ipairs(Workspace:GetChildren()) do
-		if obj:IsA("BasePart") and not obj.Anchored then
-			-- Se for uma parte solta sem nome importante, tchau.
-			for _, trashName in ipairs(TRASH_NAMES) do
-				if string.find(obj.Name, trashName) then
-					obj:Destroy()
-					count += 1
-					break
-				end
-			end
-		end
-	end
-
-	-- 2. Limpeza de Sons que já terminaram
-	for _, sound in ipairs(Workspace:GetDescendants()) do
-		if sound:IsA("Sound") and sound.Playing == false and sound.TimePosition == 0 then
-			-- Se o som não está tocando e não está no início, provavelmente é lixo
-			sound:Destroy()
-			count += 1
-		end
-	end
-
-	-- 3. Forçar Coleta de Lixo (LUA GC)
-	if count > 0 then
-		collectgarbage("step", 100)
-		print("🧹 JANITOR: Removidos "..count.." objetos inúteis da memória.")
-	end
-end
-
---// LOOP DE MANUTENÇÃO
-task.spawn(function()
-	while true do
-		task.wait(CLEAN_SETTINGS.CLEAN_INTERVAL)
-		
-		-- Executa a limpeza em pedaços para não dar lag (Time Slicing)
-		pcall(cleanGarbage)
-		
-		-- Reduz a taxa de atualização de física de objetos distantes
-		-- Isso libera CPU para o jogador
-		for _, part in ipairs(Workspace:GetDescendants()) do
-			if part:IsA("BasePart") and not part.Anchored then
-				local player = game.Players.LocalPlayer
-				if player.Character and player.Character.PrimaryPart then
-					local dist = (part.Position - player.Character.PrimaryPart.Position).Magnitude
-					if dist > 150 then
-						part.SetNetworkOwner(nil) -- Devolve pro servidor se estiver longe
-					end
-				end
-			end
-		end
-	end
-end)
-
---// REMOVEDOR DE TEXTURAS DE TERRENO (MUITO PESADO)
--- Se você não se importa com a estética do chão:
-local function simplifyTerrain()
-	local terrain = Workspace:FindFirstChildOfClass("Terrain")
-	if terrain then
-		terrain.WaterReflectance = 0
-		terrain.WaterWaveSize = 0
-		terrain.WaterWaveSpeed = 0
-		-- Desativa decorações de grama se o PC for muito fraco
-		terrain.Decoration = false 
-	end
-end
-
-simplifyTerrain()
-
-print("🧹 SISTEMA DE LIMPEZA E MEMÓRIA ATIVADO")
-
---!strict
-
---// SERVICES
-local Workspace = game:GetService("Workspace")
-local Lighting = game:GetService("Lighting")
-local RunService = game:GetService("RunService")
-
---// CONFIGURAÇÕES ADICIONAIS
-local EXTRA_SETTINGS = {
-	MAX_VIEW_ANGLE = 75, -- Ângulo de visão para considerar objetos "atrás" do player
-	LOW_RAM_MODE = true,  -- Se verdadeiro, remove texturas de alta resolução
-	TEXTURE_ID = "rbxassetid://0", -- Textura invisível/nula
-}
-
---// GERENCIADOR DE TEXTURAS (ECONOMIA DE VRAM)
--- Reduz o consumo de memória de vídeo substituindo texturas por cores sólidas
-local function minimizeTextures(obj: Instance)
-	if obj:IsA("Texture") or obj:IsA("Decal") then
-		obj.Texture = EXTRA_SETTINGS.TEXTURE_ID
-	elseif obj:IsA("MeshPart") then
-		obj.TextureID = ""
-	elseif obj:IsA("SpecialMesh") then
-		obj.TextureId = ""
-	end
-end
-
---// FRUSTUM CULLING SIMPLIFICADO (OTIMIZAÇÃO DE CÂMERA)
--- Esconde objetos que estão totalmente atrás da câmera do jogador
-local function isFacing(part: BasePart): boolean
-	local camera = Workspace.CurrentCamera
-	if not camera then return true end
-	
-	local direction = (part.Position - camera.CFrame.Position).Unit
-	local look = camera.CFrame.LookVector
-	local dot = direction:Dot(look)
-	
-	-- Se o dot product for menor que 0, o objeto está atrás da câmera
-	return dot > 0.2 
-end
-
---// APLICAÇÃO DE REGRAS DE RENDERIZAÇÃO DA ENGINE
-local function applyEngineOptimizations()
-	-- Força o nível de detalhe das meshes para o mínimo possível
-	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-	
-	-- Ajusta propriedades de iluminação que pesam na GPU
-	Lighting.GlobalShadows = false
-	Lighting.Outlines = false
-	Lighting.Technology = Enum.Technology.Compatibility -- Tenta forçar o modo mais leve
-	
-	-- Desativa efeitos ambientais pesados
-	for _, effect in ipairs(Lighting:GetChildren()) do
-		if effect:IsA("PostEffect") or effect:IsA("BloomEffect") or effect:IsA("SunRaysEffect") then
-			(effect as any).Enabled = false
-		end
-	end
-end
-
---// LOOP DE VISIBILIDADE (ECONOMIA DE DRAW CALLS)
-task.spawn(function()
-	applyEngineOptimizations()
-	
-	while true do
-		task.wait(0.5) -- Frequência moderada para não pesar a CPU
-		
-		local camera = Workspace.CurrentCamera
-		if not camera then continue end
-
-		for _, obj in ipairs(Workspace:GetDescendants()) do
-			if obj:IsA("BasePart") and not obj.Anchored then
-				-- Se o objeto está muito longe ou atrás da câmera, para de renderizar
-				if not isFacing(obj) then
+				-- LOD EXTREMO
+				if distSq > SETTINGS.DIST.RENDER then
 					obj.LocalTransparencyModifier = 1
 				else
-					-- O script anterior cuidará da transparência por distância
+					obj.LocalTransparencyModifier = 0
 				end
-			end
-			
-			-- Se o modo Low RAM estiver ativo, limpa texturas novas que aparecerem
-			if EXTRA_SETTINGS.LOW_RAM_MODE then
-				if obj:IsA("Texture") or obj:IsA("Decal") or obj:IsA("MeshPart") then
-					minimizeTextures(obj)
+
+				obj.CastShadow = false
+
+				if mode ~= "HIGH" then
+					obj.Material = Enum.Material.SmoothPlastic
+					obj.Reflectance = 0
 				end
+
+				-- DESATIVA FÍSICA LONGE
+				if mode == "LOW" and distSq > SETTINGS.DIST.PHYSICS then
+					obj.CanTouch = false
+					obj.AssemblyLinearVelocity = Vector3.zero
+				end
+
+			elseif obj:IsA("Light") then
+				local p = obj.Parent
+				if p and p:IsA("BasePart") then
+					local d = (p.Position - pos).Magnitude
+					obj.Enabled = (mode ~= "LOW") and (d < SETTINGS.DIST.LIGHT)
+				end
+
+			elseif obj:IsA("ParticleEmitter") then
+				obj.Enabled = (mode == "HIGH")
+
+			elseif obj:IsA("Decal") or obj:IsA("Texture") then
+				obj.Transparency = (mode == "HIGH") and 0 or 1
+
+			elseif obj:IsA("Sound") then
+				local p = obj.Parent
+				if p and p:IsA("BasePart") then
+					obj.Volume = ((p.Position - pos).Magnitude < SETTINGS.DIST.RENDER) and 1 or 0
+				end
+
+			elseif obj:IsA("MeshPart") then
+				obj.RenderFidelity = Enum.RenderFidelity.Performance
+				obj.TextureID = ""
+
 			end
+		end
+
+		-- RESET LOOP (circular)
+		if index > #objects then
+			index = 1
 		end
 	end
 end)
 
---// REMOÇÃO DE DECORAÇÕES INÚTEIS
-local function nukeExtraDecor()
-	for _, obj in ipairs(Workspace:GetDescendants()) do
-		if obj:IsA("Clouds") or obj:IsA("Sky") then
-			-- Opcional: manter o Sky se não quiser um céu preto, mas Clouds pesam.
-			if obj:IsA("Clouds") then obj:Destroy() end
-		end
-	end
-end
-
-nukeExtraDecor()
-
-print("🛠️ ENGINE TUNER: Otimizações de renderização aplicadas.")
-
---!strict
-
---// SERVICES
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local GuiService = game:GetService("GuiService")
-
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
-
---// CONFIGURAÇÕES
-local UI_SETTINGS = {
-	DISABLE_LOADER = true,     -- Desativa animações de carregamento se o FPS estiver baixo
-	UI_RECHECK_RATE = 5,       -- Segundos entre varreduras de UI
-	MAX_NETWORK_DISTANCE = 200 -- Distância para ignorar atualizações de física de outros
-}
-
---// GERENCIADOR DE CONEXÕES (PREVINE LEAKS)
-local connections: {RBXScriptConnection} = {}
-
---// OTIMIZADOR DE UI (OCULTAR O QUE NÃO APARECE)
--- Se uma ScreenGui não é visível, não há razão para o motor processar seus cálculos de layout.
-local function optimizeUIs()
-	for _, gui in ipairs(playerGui:GetChildren()) do
-		if gui:IsA("ScreenGui") and gui.Enabled then
-			-- Se houver algum elemento que cobre a tela toda, podemos desativar o que está atrás
-			-- Mas aqui focaremos em desativar efeitos de transparência complexos
-			for _, descendant in ipairs(gui:GetDescendants()) do
-				if descendant:IsA("Frame") then
-					-- Esquinas arredondadas (UICorner) pesam em dispositivos móveis
-					local corner = descendant:FindFirstChildOfClass("UICorner")
-					if corner then
-						-- corner.Enabled = false -- (Opcional: Desative se quiser performance extrema)
-					end
-				end
-			end
-		end
-	end
-end
-
---// OTIMIZAÇÃO DE NETWORK (LARGURA DE BANDA)
--- Evita que seu cliente tente calcular a física de objetos que o servidor deveria cuidar
-local function stabilizeNetwork()
-	for _, otherPlayer in ipairs(Players:GetPlayers()) do
-		if otherPlayer ~= player and otherPlayer.Character then
-			local root = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
-			local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-			
-			if root and myRoot then
-				local dist = (root.Position - (myRoot :: BasePart).Position).Magnitude
-				if dist > UI_SETTINGS.MAX_NETWORK_DISTANCE then
-					-- Se o player está longe, reduzimos a prioridade de replicação
-					-- Isso é feito automaticamente pelo Roblox, mas forçamos a limpeza de cache
-				end
-			end
-		end
-	end
-end
-
---// THROWING GC (GARBAGE COLLECTOR ADRESS)
--- Pequenos picos de lag às vezes são causados por tabelas Lua acumuladas
-local function forceLuaCleanup()
-	collectgarbage("collect")
-end
-
---// EXECUÇÃO
+--// LIMPEZA ULTRA LEVE (SEM TRAVAR)
 task.spawn(function()
 	while true do
-		task.wait(UI_SETTINGS.UI_RECHECK_RATE)
-		
-		pcall(optimizeUIs)
-		pcall(stabilizeNetwork)
-		
-		-- Se a memória estiver muito alta, força uma limpeza
-		local mem = Stats():GetTotalMemoryUsageMb()
-		if mem > 1000 then -- Se passar de 1GB de uso (ajustável)
-			forceLuaCleanup()
+		task.wait(10)
+
+		local removed = 0
+
+		for i = #objects, 1, -1 do
+			local obj = objects[i]
+
+			if not obj or not obj.Parent then
+				table.remove(objects, i)
+				removed += 1
+			end
+		end
+
+		if removed > 0 then
+			collectgarbage("step", 50)
 		end
 	end
 end)
 
--- Desativa o Chat do Roblox se o dispositivo for muito antigo (Opcional)
--- if UserInputService.TouchEnabled then ... end
+--// MODO DESTRUTIVO (GANHO ABSURDO DE FPS)
+task.spawn(function()
+	task.wait(5)
 
-print("📱 UI & NETWORK TUNER: Estabilizado.")
+	for _, v in ipairs(Lighting:GetChildren()) do
+		if v:IsA("PostEffect") then
+			v.Enabled = false
+		end
+	end
+
+	local terrain = Workspace:FindFirstChildOfClass("Terrain")
+	if terrain then
+		terrain.Decoration = false
+		terrain.WaterWaveSize = 0
+		terrain.WaterWaveSpeed = 0
+	end
+end)
+
+print("🔥 ULTRA OTIMIZADOR V3 ATIVO")
