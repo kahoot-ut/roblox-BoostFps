@@ -1,22 +1,253 @@
-feat: adicionar Ultra Otimizador V4 (modo destruição total)
+--!strict
 
-- Implementa sistema de otimização extrema focado em FPS máximo
-- Adiciona cálculo de distância ao quadrado (remoção de .Magnitude)
-- Introduz cache otimizado com remoção O(1)
-- Cria batch dinâmico baseado no FPS atual
-- Desativa sombras, iluminação e pós-processamento global
-- Remove partículas, texturas, sons e animações
-- Simplifica materiais para SmoothPlastic
-- Implementa desativação agressiva de física (colisão, toque, query)
-- Adiciona sistema de destruição de objetos distantes (DESTROY_MODE)
-- Reduz carga de Terrain (água e decoração)
-- Aplica skip de objetos extremamente distantes (redução de processamento)
-- Melhora coleta de lixo com limpeza periódica otimizada
+--// SERVICES
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
 
-BREAKING CHANGE:
+local player = Players.LocalPlayer
 
-- Redução extrema da qualidade visual
-- Possível quebra de mecânicas do jogo (física, colisão e animações)
-- Objetos podem ser destruídos permanentemente em runtime
+--// CONFIG (AGRESSIVO)
+local SETTINGS = {
+	RECHECK = 1,
+	BASE_BATCH = 140,
 
-Perf: ganho significativo de FPS em cenários com alta densidade de objetos
+	DIST = {
+		RENDER = 180,
+		PHYSICS = 120,
+		KILL = 260 -- distância pra destruir
+	},
+
+	FPS = {
+		LOW = 35,
+		MED = 55
+	},
+
+	DESTROY_MODE = true -- 💀 destrói objetos longe
+}
+
+type Mode = "LOW" | "MEDIUM" | "HIGH"
+local mode: Mode = "HIGH"
+local fps = 60
+
+--// CACHE OTIMIZADO (O(1))
+local objects: {Instance} = {}
+local indexMap: {[Instance]: number} = {}
+
+local function removeObject(obj: Instance)
+	local i = indexMap[obj]
+	if not i then return end
+
+	local last = objects[#objects]
+	objects[i] = last
+	indexMap[last] = i
+
+	objects[#objects] = nil
+	indexMap[obj] = nil
+end
+
+--// PROTEÇÃO
+local function isProtected(obj: Instance): boolean
+	local char = player.Character
+	if char and obj:IsDescendantOf(char) then return true end
+	if obj:IsDescendantOf(player:WaitForChild("PlayerGui")) then return true end
+	return false
+end
+
+--// REGISTRO
+local function register(obj: Instance)
+	if isProtected(obj) then return end
+
+	indexMap[obj] = #objects + 1
+	objects[#objects + 1] = obj
+
+	obj.Destroying:Once(function()
+		removeObject(obj)
+	end)
+end
+
+-- INIT SEM TRAVAR
+task.spawn(function()
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		register(obj)
+		task.wait()
+	end
+end)
+
+Workspace.DescendantAdded:Connect(register)
+
+--// FPS TRACKER
+task.spawn(function()
+	local last = tick()
+	local frames = 0
+
+	RunService.Heartbeat:Connect(function()
+		frames += 1
+		local now = tick()
+
+		if now - last >= 1 then
+			fps = frames
+			frames = 0
+			last = now
+
+			if fps <= SETTINGS.FPS.LOW then
+				mode = "LOW"
+			elseif fps <= SETTINGS.FPS.MED then
+				mode = "MEDIUM"
+			else
+				mode = "HIGH"
+			end
+		end
+	end)
+end)
+
+--// KILL GLOBAL VISUAL
+Lighting.GlobalShadows = false
+Lighting.FogEnd = 1e9
+Lighting.Brightness = 0
+Lighting.EnvironmentDiffuseScale = 0
+Lighting.EnvironmentSpecularScale = 0
+
+pcall(function()
+	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+end)
+
+--// DESTRUIR PÓS-EFEITOS
+task.spawn(function()
+	task.wait(2)
+
+	for _, v in ipairs(Lighting:GetDescendants()) do
+		if v:IsA("PostEffect") then
+			v:Destroy()
+		end
+	end
+end)
+
+--// LOOP PRINCIPAL
+task.spawn(function()
+	local index = 1
+
+	while true do
+		task.wait(SETTINGS.RECHECK)
+
+		local char = player.Character
+		local root = char and char.PrimaryPart
+		if not root then continue end
+
+		local pos = root.Position
+
+		local batch = SETTINGS.BASE_BATCH
+		if mode == "LOW" then
+			batch = 70
+		elseif mode == "MEDIUM" then
+			batch = 100
+		end
+
+		local processed = 0
+
+		while processed < batch and index <= #objects do
+			local obj = objects[index]
+			index += 1
+			processed += 1
+
+			if not obj or not obj.Parent then continue end
+
+			-- BASEPART
+			if obj:IsA("BasePart") then
+				local d = obj.Position - pos
+				local distSq = d.X*d.X + d.Y*d.Y + d.Z*d.Z
+
+				local renderDist = SETTINGS.DIST.RENDER * SETTINGS.DIST.RENDER
+				local physicsDist = SETTINGS.DIST.PHYSICS * SETTINGS.DIST.PHYSICS
+				local killDist = SETTINGS.DIST.KILL * SETTINGS.DIST.KILL
+
+				-- 💀 DESTRUIR
+				if SETTINGS.DESTROY_MODE and distSq > killDist then
+					obj:Destroy()
+					continue
+				end
+
+				-- SKIP LONGE DEMAIS
+				if distSq > renderDist * 4 then
+					continue
+				end
+
+				-- VISUAL ZERO
+				if distSq > renderDist then
+					obj.LocalTransparencyModifier = 1
+				else
+					obj.LocalTransparencyModifier = 0
+				end
+
+				obj.CastShadow = false
+				obj.Material = Enum.Material.SmoothPlastic
+				obj.Reflectance = 0
+				obj.Color = Color3.new(0.5,0.5,0.5)
+
+				-- 💀 FÍSICA OFF
+				if mode == "LOW" and distSq > physicsDist then
+					obj.CanCollide = false
+					obj.CanTouch = false
+					obj.CanQuery = false
+					obj.AssemblyLinearVelocity = Vector3.zero
+				end
+
+			elseif obj:IsA("Light") then
+				obj.Enabled = false
+
+			elseif obj:IsA("ParticleEmitter") then
+				obj.Enabled = false
+
+			elseif obj:IsA("Decal") or obj:IsA("Texture") then
+				obj.Transparency = 1
+
+			elseif obj:IsA("Sound") then
+				obj.Volume = 0
+
+			elseif obj:IsA("MeshPart") then
+				obj.TextureID = ""
+				obj.RenderFidelity = Enum.RenderFidelity.Performance
+
+			elseif obj:IsA("Animator") or obj:IsA("AnimationController") then
+				obj:Destroy()
+			end
+		end
+
+		if index > #objects then
+			index = 1
+		end
+	end
+end)
+
+--// LIMPEZA
+task.spawn(function()
+	while true do
+		task.wait(8)
+
+		for i = #objects, 1, -1 do
+			local obj = objects[i]
+			if not obj or not obj.Parent then
+				removeObject(obj)
+			end
+		end
+
+		collectgarbage("step", 100)
+	end
+end)
+
+--// TERRAIN KILL
+task.spawn(function()
+	task.wait(3)
+
+	local terrain = Workspace:FindFirstChildOfClass("Terrain")
+	if terrain then
+		terrain.Decoration = false
+		terrain.WaterWaveSize = 0
+		terrain.WaterWaveSpeed = 0
+		terrain.WaterReflectance = 0
+		terrain.WaterTransparency = 1
+	end
+end)
+
+print("💀 ULTRA OTIMIZADOR V4 - MODO DESTRUIÇÃO TOTAL")
