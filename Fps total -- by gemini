@@ -17,7 +17,7 @@ local SETTINGS = {
 	DIST_MID = 180,
 	DIST_FAR = 400,
 
-	FOV_DOT = 0.06,
+	FOV_DOT = 0,
 
 	FPS_LOW = 35,
 	FPS_MED = 55,
