@@ -3,134 +3,70 @@
 --// SERVICES
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
-local Lighting = game:GetService("Lighting")
 local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
 
 --// CONFIG
 local SETTINGS = {
-	RECHECK = 0.12,
-	BASE_BATCH = 250,
+	BATCH = 500,
 
-	DIST = {
-		NEAR = 70,
-		MID = 150,
-		FAR = 260
-	},
+	DIST_NEAR = 80,
+	DIST_MID = 180,
 
-	FPS = {
-		LOW = 35,
-		MED = 55
-	}
+	FOV_DOT = 0.35, -- quanto menor = mais agressivo (0.35 = ~120° visão)
+
+	FPS_LOW = 35,
+	FPS_MED = 55
 }
 
-type Mode = "LOW" | "MEDIUM" | "HIGH"
-local mode: Mode = "HIGH"
-local fps = 60
+local NEAR_SQ = SETTINGS.DIST_NEAR^2
+local MID_SQ = SETTINGS.DIST_MID^2
 
---// CACHE
-local objects: {Instance} = {}
+--// STATE
+local objects: {BasePart} = {}
 local indexMap: {[Instance]: number} = {}
+local originalParent: {[Instance]: Instance} = {}
+local cursor = 1
 
-local originalProps: {[Instance]: any} = {}
-
---// REMOVE
-local function removeObject(obj: Instance)
-	local i = indexMap[obj]
-	if not i then return end
-
-	local last = objects[#objects]
-	objects[i] = last
-	indexMap[last] = i
-
-	objects[#objects] = nil
-	indexMap[obj] = nil
-	originalProps[obj] = nil
-end
-
---// PROTECTION
-local function isProtected(obj: Instance): boolean
-	local char = player.Character
-
-	if char and obj:IsDescendantOf(char) then return true end
-	if obj:IsDescendantOf(player:WaitForChild("PlayerGui")) then return true end
-
-	if obj:IsA("Humanoid")
-		or obj:IsA("Tool")
-		or obj:IsA("Script")
-		or obj:IsA("LocalScript")
-		or obj:IsA("ModuleScript")
-	then
-		return true
-	end
-
-	return false
-end
-
---// TYPE
-local function getType(obj: Instance): string
-	if obj:IsA("BasePart") then return "PART" end
-	if obj:IsA("Decal") or obj:IsA("Texture") then return "DECAL" end
-	if obj:IsA("ParticleEmitter") then return "PARTICLE" end
-	if obj:IsA("Light") then return "LIGHT" end
-	if obj:IsA("Sound") then return "SOUND" end
-	if obj:IsA("MeshPart") then return "MESH" end
-	return "OTHER"
-end
+local fps = 60
+local mode = "HIGH"
 
 --// REGISTER
 local function register(obj: Instance)
-	if isProtected(obj) then return end
+	if not obj:IsA("BasePart") then return end
+	if obj:IsDescendantOf(player.Character or nil) then return end
 
 	indexMap[obj] = #objects + 1
 	objects[#objects + 1] = obj
 
-	-- salvar estado original
-	if obj:IsA("BasePart") then
-		originalProps[obj] = {
-			Material = obj.Material,
-			Reflectance = obj.Reflectance,
-			CastShadow = obj.CastShadow,
-			Transparency = obj.Transparency
-		}
-	elseif obj:IsA("MeshPart") then
-		originalProps[obj] = {
-			TextureID = obj.TextureID
-		}
-	end
-
 	obj.Destroying:Once(function()
-		removeObject(obj)
+		indexMap[obj] = nil
 	end)
 end
 
--- inicial
-task.spawn(function()
-	for _, obj in ipairs(Workspace:GetDescendants()) do
-		register(obj)
-	end
-end)
+for _, obj in ipairs(Workspace:GetDescendants()) do
+	register(obj)
+end
 
 Workspace.DescendantAdded:Connect(register)
 
---// FPS TRACKER
+--// FPS TRACK
 task.spawn(function()
 	local last = tick()
 	local frames = 0
 
 	RunService.Heartbeat:Connect(function()
 		frames += 1
-		local now = tick()
-
-		if now - last >= 1 then
+		if tick() - last >= 1 then
 			fps = frames
 			frames = 0
-			last = now
+			last = tick()
 
-			if fps <= SETTINGS.FPS.LOW then
+			if fps <= SETTINGS.FPS_LOW then
 				mode = "LOW"
-			elseif fps <= SETTINGS.FPS.MED then
+			elseif fps <= SETTINGS.FPS_MED then
 				mode = "MEDIUM"
 			else
 				mode = "HIGH"
@@ -139,137 +75,116 @@ task.spawn(function()
 	end)
 end)
 
---// LIGHTING BOOST
-Lighting.GlobalShadows = false
-Lighting.FogEnd = 1e9
-Lighting.Brightness = 1
+--// NEXT BATCH
+local function nextBatch(size)
+	local batch = {}
 
-pcall(function()
-	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-end)
+	for i = 1, size do
+		if cursor > #objects then
+			cursor = 1
+			break
+		end
 
---// PRIORITY BUFFERS (sem sort pesado)
-local nearList, midList, farList = {}, {}, {}
+		batch[#batch+1] = objects[cursor]
+		cursor += 1
+	end
 
---// LOOP
+	return batch
+end
+
+--// MAIN LOOP
 task.spawn(function()
 	while true do
-		task.wait(SETTINGS.RECHECK)
+		local waitTime = 0.1
+		local budget = SETTINGS.BATCH
+
+		if mode == "LOW" then
+			waitTime = 0.2
+			budget = 300
+		elseif mode == "MEDIUM" then
+			waitTime = 0.14
+			budget = 400
+		end
+
+		task.wait(waitTime)
 
 		local char = player.Character
 		local root = char and char.PrimaryPart
 		if not root then continue end
 
-		local pos = root.Position
+		local camPos = camera.CFrame.Position
+		local camLook = camera.CFrame.LookVector
 
-		-- limpa listas
-		table.clear(nearList)
-		table.clear(midList)
-		table.clear(farList)
+		for _, part in ipairs(nextBatch(budget)) do
+			if not part or not part.Parent then continue end
 
-		-- classifica rapidamente
-		for _, obj in ipairs(objects) do
-			if obj:IsA("BasePart") then
-				local dist = (obj.Position - pos).Magnitude
+			local diff = part.Position - camPos
 
-				if dist <= SETTINGS.DIST.NEAR then
-					nearList[#nearList+1] = obj
-				elseif dist <= SETTINGS.DIST.MID then
-					midList[#midList+1] = obj
-				else
-					farList[#farList+1] = obj
+			-- distância sem sqrt
+			local distSq = diff.X*diff.X + diff.Y*diff.Y + diff.Z*diff.Z
+
+			-- direção normalizada simplificada
+			local mag = math.max(distSq, 0.0001)
+			local dir = diff / mag
+
+			-- dot product (visão)
+			local dot = dir:Dot(camLook)
+
+			-- 🔥 FORA DA TELA = HIBERNAR
+			if dot < SETTINGS.FOV_DOT then
+				if not originalParent[part] then
+					originalParent[part] = part.Parent
+					part.Parent = nil
+				end
+				continue
+			end
+
+			-- NEAR
+			if distSq <= NEAR_SQ then
+				if originalParent[part] then
+					part.Parent = originalParent[part]
+					originalParent[part] = nil
+				end
+
+				part.LocalTransparencyModifier = 0
+				part.CanCollide = true
+
+			-- MID
+			elseif distSq <= MID_SQ then
+				if originalParent[part] then
+					part.Parent = originalParent[part]
+					originalParent[part] = nil
+				end
+
+				part.LocalTransparencyModifier = 0.5
+				part.CastShadow = false
+				part.Material = Enum.Material.SmoothPlastic
+
+			-- FAR
+			else
+				if not originalParent[part] then
+					originalParent[part] = part.Parent
+					part.Parent = nil
 				end
 			end
 		end
-
-		local function process(list, level)
-			local count = 0
-			local max = SETTINGS.BASE_BATCH
-
-			if mode == "LOW" then max = 180 end
-			if mode == "MEDIUM" then max = 220 end
-
-			for i = 1, #list do
-				if count >= max then break end
-				count += 1
-
-				local obj = list[i]
-				if not obj or not obj.Parent then continue end
-
-				local t = getType(obj)
-
-				if t == "PART" then
-					local part = obj :: BasePart
-					local original = originalProps[part]
-
-					if level == "NEAR" then
-						if original then
-							part.Material = original.Material
-							part.Reflectance = original.Reflectance
-							part.CastShadow = original.CastShadow
-							part.Transparency = original.Transparency
-						end
-						part.LocalTransparencyModifier = 0
-
-					elseif level == "MID" then
-						part.LocalTransparencyModifier = 0.5
-						part.Material = Enum.Material.SmoothPlastic
-						part.CastShadow = false
-
-					elseif level == "FAR" then
-						part.LocalTransparencyModifier = 1
-						part.CastShadow = false
-					end
-
-				elseif t == "DECAL" then
-					obj.Transparency = (level == "NEAR") and 0 or 1
-
-				elseif t == "PARTICLE" then
-					obj.Enabled = (level == "NEAR")
-
-				elseif t == "LIGHT" then
-					obj.Enabled = (level == "NEAR")
-
-				elseif t == "SOUND" then
-					obj.Volume = (level == "NEAR") and 1 or 0
-
-				elseif t == "MESH" then
-					local mesh = obj :: MeshPart
-					local original = originalProps[mesh]
-
-					if level == "NEAR" then
-						if original then
-							mesh.TextureID = original.TextureID
-						end
-					else
-						mesh.TextureID = ""
-						mesh.RenderFidelity = Enum.RenderFidelity.Performance
-					end
-				end
-			end
-		end
-
-		-- 🔥 PRIORIDADE REAL
-		process(nearList, "NEAR")
-		process(midList, "MID")
-		process(farList, "FAR")
 	end
 end)
 
---// CLEAN
+-- CLEAN
 task.spawn(function()
 	while true do
-		task.wait(8)
+		task.wait(10)
 
 		for i = #objects, 1, -1 do
 			local obj = objects[i]
 			if not obj or not obj.Parent then
-				removeObject(obj)
+				objects[i] = nil
 			end
 		end
 
-		collectgarbage("step", 200)
+		collectgarbage("step", 400)
 	end
 end)
 
-print("⚡ ULTRA OTIMIZADOR V6 ATIVO")
+print("💀 OTIMIZADOR V8 EXTREMO ATIVO")
