@@ -8,23 +8,21 @@ local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 
---// CONFIG INTELIGENTE
+--// CONFIG
 local SETTINGS = {
-	RECHECK = 0.5,
-	BASE_BATCH = 120,
+	RECHECK = 0.12,
+	BASE_BATCH = 250,
 
 	DIST = {
-		NEAR = 60,
-		MID = 140,
-		FAR = 220
+		NEAR = 70,
+		MID = 150,
+		FAR = 260
 	},
 
 	FPS = {
 		LOW = 35,
 		MED = 55
-	},
-
-	SMART_DESTROY = true
+	}
 }
 
 type Mode = "LOW" | "MEDIUM" | "HIGH"
@@ -35,6 +33,9 @@ local fps = 60
 local objects: {Instance} = {}
 local indexMap: {[Instance]: number} = {}
 
+local originalProps: {[Instance]: any} = {}
+
+--// REMOVE
 local function removeObject(obj: Instance)
 	local i = indexMap[obj]
 	if not i then return end
@@ -45,9 +46,10 @@ local function removeObject(obj: Instance)
 
 	objects[#objects] = nil
 	indexMap[obj] = nil
+	originalProps[obj] = nil
 end
 
---// 🔒 PROTEÇÃO FORTE
+--// PROTECTION
 local function isProtected(obj: Instance): boolean
 	local char = player.Character
 
@@ -59,17 +61,6 @@ local function isProtected(obj: Instance): boolean
 		or obj:IsA("Script")
 		or obj:IsA("LocalScript")
 		or obj:IsA("ModuleScript")
-		or obj:IsA("SpawnLocation")
-	then
-		return true
-	end
-
-	local name = obj.Name:lower()
-
-	if name:find("hitbox")
-		or name:find("trigger")
-		or name:find("door")
-		or name:find("checkpoint")
 	then
 		return true
 	end
@@ -77,7 +68,7 @@ local function isProtected(obj: Instance): boolean
 	return false
 end
 
---// 🧠 CLASSIFICAÇÃO
+--// TYPE
 local function getType(obj: Instance): string
 	if obj:IsA("BasePart") then return "PART" end
 	if obj:IsA("Decal") or obj:IsA("Texture") then return "DECAL" end
@@ -88,22 +79,36 @@ local function getType(obj: Instance): string
 	return "OTHER"
 end
 
---// REGISTRO
+--// REGISTER
 local function register(obj: Instance)
 	if isProtected(obj) then return end
 
 	indexMap[obj] = #objects + 1
 	objects[#objects + 1] = obj
 
+	-- salvar estado original
+	if obj:IsA("BasePart") then
+		originalProps[obj] = {
+			Material = obj.Material,
+			Reflectance = obj.Reflectance,
+			CastShadow = obj.CastShadow,
+			Transparency = obj.Transparency
+		}
+	elseif obj:IsA("MeshPart") then
+		originalProps[obj] = {
+			TextureID = obj.TextureID
+		}
+	end
+
 	obj.Destroying:Once(function()
 		removeObject(obj)
 	end)
 end
 
+-- inicial
 task.spawn(function()
 	for _, obj in ipairs(Workspace:GetDescendants()) do
 		register(obj)
-		task.wait()
 	end
 end)
 
@@ -134,7 +139,7 @@ task.spawn(function()
 	end)
 end)
 
---// 🔥 LIGHTING KILL (SAFE)
+--// LIGHTING BOOST
 Lighting.GlobalShadows = false
 Lighting.FogEnd = 1e9
 Lighting.Brightness = 1
@@ -143,10 +148,11 @@ pcall(function()
 	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
 end)
 
---// LOOP PRINCIPAL
-task.spawn(function()
-	local index = 1
+--// PRIORITY BUFFERS (sem sort pesado)
+local nearList, midList, farList = {}, {}, {}
 
+--// LOOP
+task.spawn(function()
 	while true do
 		task.wait(SETTINGS.RECHECK)
 
@@ -156,84 +162,104 @@ task.spawn(function()
 
 		local pos = root.Position
 
-		local batch = SETTINGS.BASE_BATCH
-		if mode == "LOW" then batch = 80 end
-		if mode == "MEDIUM" then batch = 100 end
+		-- limpa listas
+		table.clear(nearList)
+		table.clear(midList)
+		table.clear(farList)
 
-		local processed = 0
+		-- classifica rapidamente
+		for _, obj in ipairs(objects) do
+			if obj:IsA("BasePart") then
+				local dist = (obj.Position - pos).Magnitude
 
-		while processed < batch and index <= #objects do
-			local obj = objects[index]
-			index += 1
-			processed += 1
-
-			if not obj or not obj.Parent then continue end
-			if isProtected(obj) then continue end
-
-			local t = getType(obj)
-
-			-- BASEPART
-			if t == "PART" then
-				local part = obj :: BasePart
-
-				local d = part.Position - pos
-				local dist = d.Magnitude
-
-				-- 🔥 FAR (ULTRA SIMPLIFICAÇÃO)
-				if dist > SETTINGS.DIST.FAR then
-					part.LocalTransparencyModifier = 1
-					part.CastShadow = false
-
-					if SETTINGS.SMART_DESTROY then
-						-- só destrói lixo visual
-						if part.Name:lower():find("grass")
-							or part.Name:lower():find("detail")
-						then
-							part:Destroy()
-						end
-					end
-
-				-- ⚙️ MID
-				elseif dist > SETTINGS.DIST.MID then
-					part.LocalTransparencyModifier = 0.7
-					part.Material = Enum.Material.SmoothPlastic
-					part.Reflectance = 0
-					part.CastShadow = false
-
-				-- 🎯 NEAR
+				if dist <= SETTINGS.DIST.NEAR then
+					nearList[#nearList+1] = obj
+				elseif dist <= SETTINGS.DIST.MID then
+					midList[#midList+1] = obj
 				else
-					part.LocalTransparencyModifier = 0
+					farList[#farList+1] = obj
 				end
-
-			elseif t == "DECAL" then
-				obj.Transparency = 1
-
-			elseif t == "PARTICLE" then
-				obj.Enabled = false
-
-			elseif t == "LIGHT" then
-				obj.Enabled = false
-
-			elseif t == "SOUND" then
-				obj.Volume = 0
-
-			elseif t == "MESH" then
-				local mesh = obj :: MeshPart
-				mesh.TextureID = ""
-				mesh.RenderFidelity = Enum.RenderFidelity.Performance
 			end
 		end
 
-		if index > #objects then
-			index = 1
+		local function process(list, level)
+			local count = 0
+			local max = SETTINGS.BASE_BATCH
+
+			if mode == "LOW" then max = 180 end
+			if mode == "MEDIUM" then max = 220 end
+
+			for i = 1, #list do
+				if count >= max then break end
+				count += 1
+
+				local obj = list[i]
+				if not obj or not obj.Parent then continue end
+
+				local t = getType(obj)
+
+				if t == "PART" then
+					local part = obj :: BasePart
+					local original = originalProps[part]
+
+					if level == "NEAR" then
+						if original then
+							part.Material = original.Material
+							part.Reflectance = original.Reflectance
+							part.CastShadow = original.CastShadow
+							part.Transparency = original.Transparency
+						end
+						part.LocalTransparencyModifier = 0
+
+					elseif level == "MID" then
+						part.LocalTransparencyModifier = 0.5
+						part.Material = Enum.Material.SmoothPlastic
+						part.CastShadow = false
+
+					elseif level == "FAR" then
+						part.LocalTransparencyModifier = 1
+						part.CastShadow = false
+					end
+
+				elseif t == "DECAL" then
+					obj.Transparency = (level == "NEAR") and 0 or 1
+
+				elseif t == "PARTICLE" then
+					obj.Enabled = (level == "NEAR")
+
+				elseif t == "LIGHT" then
+					obj.Enabled = (level == "NEAR")
+
+				elseif t == "SOUND" then
+					obj.Volume = (level == "NEAR") and 1 or 0
+
+				elseif t == "MESH" then
+					local mesh = obj :: MeshPart
+					local original = originalProps[mesh]
+
+					if level == "NEAR" then
+						if original then
+							mesh.TextureID = original.TextureID
+						end
+					else
+						mesh.TextureID = ""
+						mesh.RenderFidelity = Enum.RenderFidelity.Performance
+					end
+				end
+			end
 		end
+
+		-- 🔥 PRIORIDADE REAL
+		process(nearList, "NEAR")
+		process(midList, "MID")
+		process(farList, "FAR")
 	end
 end)
 
---// LIMPEZA
+--// CLEAN
 task.spawn(function()
 	while true do
-		task.wait(10)
+		task.wait(8)
 
 		for i = #objects, 1, -1 do
 			local obj = objects[i]
@@ -242,8 +268,8 @@ task.spawn(function()
 			end
 		end
 
-		collectgarbage("step", 150)
+		collectgarbage("step", 200)
 	end
 end)
 
-print("⚡ ULTRA OTIMIZADOR V5 - INTELIGENTE ATIVO")
+print("⚡ ULTRA OTIMIZADOR V6 ATIVO")
