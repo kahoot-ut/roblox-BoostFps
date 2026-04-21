@@ -8,15 +8,15 @@ local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 
---// CONFIG (AGRESSIVO)
+--// CONFIG INTELIGENTE
 local SETTINGS = {
-	RECHECK = 1,
-	BASE_BATCH = 140,
+	RECHECK = 0.5,
+	BASE_BATCH = 120,
 
 	DIST = {
-		RENDER = 180,
-		PHYSICS = 120,
-		KILL = 260 -- distância pra destruir
+		NEAR = 60,
+		MID = 140,
+		FAR = 220
 	},
 
 	FPS = {
@@ -24,14 +24,14 @@ local SETTINGS = {
 		MED = 55
 	},
 
-	DESTROY_MODE = true -- 💀 destrói objetos longe
+	SMART_DESTROY = true
 }
 
 type Mode = "LOW" | "MEDIUM" | "HIGH"
 local mode: Mode = "HIGH"
 local fps = 60
 
---// CACHE OTIMIZADO (O(1))
+--// CACHE
 local objects: {Instance} = {}
 local indexMap: {[Instance]: number} = {}
 
@@ -47,12 +47,45 @@ local function removeObject(obj: Instance)
 	indexMap[obj] = nil
 end
 
---// PROTEÇÃO
+--// 🔒 PROTEÇÃO FORTE
 local function isProtected(obj: Instance): boolean
 	local char = player.Character
+
 	if char and obj:IsDescendantOf(char) then return true end
 	if obj:IsDescendantOf(player:WaitForChild("PlayerGui")) then return true end
+
+	if obj:IsA("Humanoid")
+		or obj:IsA("Tool")
+		or obj:IsA("Script")
+		or obj:IsA("LocalScript")
+		or obj:IsA("ModuleScript")
+		or obj:IsA("SpawnLocation")
+	then
+		return true
+	end
+
+	local name = obj.Name:lower()
+
+	if name:find("hitbox")
+		or name:find("trigger")
+		or name:find("door")
+		or name:find("checkpoint")
+	then
+		return true
+	end
+
 	return false
+end
+
+--// 🧠 CLASSIFICAÇÃO
+local function getType(obj: Instance): string
+	if obj:IsA("BasePart") then return "PART" end
+	if obj:IsA("Decal") or obj:IsA("Texture") then return "DECAL" end
+	if obj:IsA("ParticleEmitter") then return "PARTICLE" end
+	if obj:IsA("Light") then return "LIGHT" end
+	if obj:IsA("Sound") then return "SOUND" end
+	if obj:IsA("MeshPart") then return "MESH" end
+	return "OTHER"
 end
 
 --// REGISTRO
@@ -67,7 +100,6 @@ local function register(obj: Instance)
 	end)
 end
 
--- INIT SEM TRAVAR
 task.spawn(function()
 	for _, obj in ipairs(Workspace:GetDescendants()) do
 		register(obj)
@@ -102,26 +134,13 @@ task.spawn(function()
 	end)
 end)
 
---// KILL GLOBAL VISUAL
+--// 🔥 LIGHTING KILL (SAFE)
 Lighting.GlobalShadows = false
 Lighting.FogEnd = 1e9
-Lighting.Brightness = 0
-Lighting.EnvironmentDiffuseScale = 0
-Lighting.EnvironmentSpecularScale = 0
+Lighting.Brightness = 1
 
 pcall(function()
 	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-end)
-
---// DESTRUIR PÓS-EFEITOS
-task.spawn(function()
-	task.wait(2)
-
-	for _, v in ipairs(Lighting:GetDescendants()) do
-		if v:IsA("PostEffect") then
-			v:Destroy()
-		end
-	end
 end)
 
 --// LOOP PRINCIPAL
@@ -138,11 +157,8 @@ task.spawn(function()
 		local pos = root.Position
 
 		local batch = SETTINGS.BASE_BATCH
-		if mode == "LOW" then
-			batch = 70
-		elseif mode == "MEDIUM" then
-			batch = 100
-		end
+		if mode == "LOW" then batch = 80 end
+		if mode == "MEDIUM" then batch = 100 end
 
 		local processed = 0
 
@@ -152,65 +168,59 @@ task.spawn(function()
 			processed += 1
 
 			if not obj or not obj.Parent then continue end
+			if isProtected(obj) then continue end
+
+			local t = getType(obj)
 
 			-- BASEPART
-			if obj:IsA("BasePart") then
-				local d = obj.Position - pos
-				local distSq = d.X*d.X + d.Y*d.Y + d.Z*d.Z
+			if t == "PART" then
+				local part = obj :: BasePart
 
-				local renderDist = SETTINGS.DIST.RENDER * SETTINGS.DIST.RENDER
-				local physicsDist = SETTINGS.DIST.PHYSICS * SETTINGS.DIST.PHYSICS
-				local killDist = SETTINGS.DIST.KILL * SETTINGS.DIST.KILL
+				local d = part.Position - pos
+				local dist = d.Magnitude
 
-				-- 💀 DESTRUIR
-				if SETTINGS.DESTROY_MODE and distSq > killDist then
-					obj:Destroy()
-					continue
-				end
+				-- 🔥 FAR (ULTRA SIMPLIFICAÇÃO)
+				if dist > SETTINGS.DIST.FAR then
+					part.LocalTransparencyModifier = 1
+					part.CastShadow = false
 
-				-- SKIP LONGE DEMAIS
-				if distSq > renderDist * 4 then
-					continue
-				end
+					if SETTINGS.SMART_DESTROY then
+						-- só destrói lixo visual
+						if part.Name:lower():find("grass")
+							or part.Name:lower():find("detail")
+						then
+							part:Destroy()
+						end
+					end
 
-				-- VISUAL ZERO
-				if distSq > renderDist then
-					obj.LocalTransparencyModifier = 1
+				-- ⚙️ MID
+				elseif dist > SETTINGS.DIST.MID then
+					part.LocalTransparencyModifier = 0.7
+					part.Material = Enum.Material.SmoothPlastic
+					part.Reflectance = 0
+					part.CastShadow = false
+
+				-- 🎯 NEAR
 				else
-					obj.LocalTransparencyModifier = 0
+					part.LocalTransparencyModifier = 0
 				end
 
-				obj.CastShadow = false
-				obj.Material = Enum.Material.SmoothPlastic
-				obj.Reflectance = 0
-				obj.Color = Color3.new(0.5,0.5,0.5)
-
-				-- 💀 FÍSICA OFF
-				if mode == "LOW" and distSq > physicsDist then
-					obj.CanCollide = false
-					obj.CanTouch = false
-					obj.CanQuery = false
-					obj.AssemblyLinearVelocity = Vector3.zero
-				end
-
-			elseif obj:IsA("Light") then
-				obj.Enabled = false
-
-			elseif obj:IsA("ParticleEmitter") then
-				obj.Enabled = false
-
-			elseif obj:IsA("Decal") or obj:IsA("Texture") then
+			elseif t == "DECAL" then
 				obj.Transparency = 1
 
-			elseif obj:IsA("Sound") then
+			elseif t == "PARTICLE" then
+				obj.Enabled = false
+
+			elseif t == "LIGHT" then
+				obj.Enabled = false
+
+			elseif t == "SOUND" then
 				obj.Volume = 0
 
-			elseif obj:IsA("MeshPart") then
-				obj.TextureID = ""
-				obj.RenderFidelity = Enum.RenderFidelity.Performance
-
-			elseif obj:IsA("Animator") or obj:IsA("AnimationController") then
-				obj:Destroy()
+			elseif t == "MESH" then
+				local mesh = obj :: MeshPart
+				mesh.TextureID = ""
+				mesh.RenderFidelity = Enum.RenderFidelity.Performance
 			end
 		end
 
@@ -223,7 +233,7 @@ end)
 --// LIMPEZA
 task.spawn(function()
 	while true do
-		task.wait(8)
+		task.wait(10)
 
 		for i = #objects, 1, -1 do
 			local obj = objects[i]
@@ -232,22 +242,8 @@ task.spawn(function()
 			end
 		end
 
-		collectgarbage("step", 100)
+		collectgarbage("step", 150)
 	end
 end)
 
---// TERRAIN KILL
-task.spawn(function()
-	task.wait(3)
-
-	local terrain = Workspace:FindFirstChildOfClass("Terrain")
-	if terrain then
-		terrain.Decoration = false
-		terrain.WaterWaveSize = 0
-		terrain.WaterWaveSpeed = 0
-		terrain.WaterReflectance = 0
-		terrain.WaterTransparency = 1
-	end
-end)
-
-print("💀 ULTRA OTIMIZADOR V4 - MODO DESTRUIÇÃO TOTAL")
+print("⚡ ULTRA OTIMIZADOR V5 - INTELIGENTE ATIVO")
