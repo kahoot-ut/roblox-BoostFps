@@ -10,40 +10,66 @@ local camera = Workspace.CurrentCamera
 
 --// CONFIG
 local SETTINGS = {
-	BATCH = 500,
+	BATCH_MIN = 200,
+	BATCH_MAX = 700,
 
 	DIST_NEAR = 80,
 	DIST_MID = 180,
+	DIST_FAR = 400,
 
-	FOV_DOT = 0.35, -- quanto menor = mais agressivo (0.35 = ~120° visão)
+	FOV_DOT = 0.2,
 
 	FPS_LOW = 35,
-	FPS_MED = 55
+	FPS_MED = 55,
 }
 
 local NEAR_SQ = SETTINGS.DIST_NEAR^2
 local MID_SQ = SETTINGS.DIST_MID^2
+local FAR_SQ = SETTINGS.DIST_FAR^2
 
 --// STATE
-local objects: {BasePart} = {}
-local indexMap: {[Instance]: number} = {}
-local originalParent: {[Instance]: Instance} = {}
-local cursor = 1
+type ObjData = {
+	part: BasePart,
+	priority: number,
+	lastState: number
+}
 
+local objects: {ObjData} = {}
+local cursor = 1
 local fps = 60
-local mode = "HIGH"
+
+--// PRIORITY SYSTEM
+local function getPriority(part: BasePart): number
+	local size = part.Size.Magnitude
+
+	if size > 20 then return 3 end -- grande (importante)
+	if size > 8 then return 2 end  -- médio
+	return 1 -- pequeno
+end
+
+--// FILTER
+local function shouldTrack(obj: Instance)
+	if not obj:IsA("BasePart") then return false end
+	if obj:IsDescendantOf(player.Character or nil) then return false end
+	if obj.Name == "HumanoidRootPart" then return false end
+
+	-- ignora partes minúsculas (grande ganho!)
+	if obj.Size.Magnitude < 1 then return false end
+
+	return true
+end
 
 --// REGISTER
 local function register(obj: Instance)
-	if not obj:IsA("BasePart") then return end
-	if obj:IsDescendantOf(player.Character or nil) then return end
+	if not shouldTrack(obj) then return end
 
-	indexMap[obj] = #objects + 1
-	objects[#objects + 1] = obj
+	local part = obj :: BasePart
 
-	obj.Destroying:Once(function()
-		indexMap[obj] = nil
-	end)
+	table.insert(objects, {
+		part = part,
+		priority = getPriority(part),
+		lastState = -1
+	})
 end
 
 for _, obj in ipairs(Workspace:GetDescendants()) do
@@ -63,19 +89,11 @@ task.spawn(function()
 			fps = frames
 			frames = 0
 			last = tick()
-
-			if fps <= SETTINGS.FPS_LOW then
-				mode = "LOW"
-			elseif fps <= SETTINGS.FPS_MED then
-				mode = "MEDIUM"
-			else
-				mode = "HIGH"
-			end
 		end
 	end)
 end)
 
---// NEXT BATCH
+--// NEXT BATCH (PRIORITY AWARE)
 local function nextBatch(size)
 	local batch = {}
 
@@ -85,106 +103,107 @@ local function nextBatch(size)
 			break
 		end
 
-		batch[#batch+1] = objects[cursor]
+		local obj = objects[cursor]
 		cursor += 1
+
+		if obj and obj.part and obj.part.Parent then
+			table.insert(batch, obj)
+		end
 	end
 
 	return batch
 end
 
+--// APPLY STATE (COM CACHE)
+local function applyState(data: ObjData, state: number)
+	if data.lastState == state then return end
+	data.lastState = state
+
+	local part = data.part
+
+	if state == 0 then -- NEAR
+		part.LocalTransparencyModifier = 0
+		part.CastShadow = true
+		part.CanCollide = true
+
+	elseif state == 1 then -- MID
+		part.LocalTransparencyModifier = 0.4
+		part.CastShadow = false
+		part.Material = Enum.Material.SmoothPlastic
+		part.CanCollide = true
+
+	elseif state == 2 then -- FAR
+		part.LocalTransparencyModifier = 0.85
+		part.CastShadow = false
+		part.CanCollide = false
+
+	elseif state == 3 then -- HIDDEN
+		part.LocalTransparencyModifier = 1
+		part.CastShadow = false
+		part.CanCollide = false
+	end
+end
+
 --// MAIN LOOP
 task.spawn(function()
 	while true do
-		local waitTime = 0.1
-		local budget = SETTINGS.BATCH
+		local budget = math.clamp(math.floor(fps * 7), SETTINGS.BATCH_MIN, SETTINGS.BATCH_MAX)
+		task.wait(math.clamp(1 / fps, 0.08, 0.2))
 
-		if mode == "LOW" then
-			waitTime = 0.2
-			budget = 300
-		elseif mode == "MEDIUM" then
-			waitTime = 0.14
-			budget = 400
-		end
+		local camCF = camera.CFrame
+		local camPos = camCF.Position
+		local camLook = camCF.LookVector
 
-		task.wait(waitTime)
-
-		local char = player.Character
-		local root = char and char.PrimaryPart
-		if not root then continue end
-
-		local camPos = camera.CFrame.Position
-		local camLook = camera.CFrame.LookVector
-
-		for _, part in ipairs(nextBatch(budget)) do
-			if not part or not part.Parent then continue end
+		for _, data in ipairs(nextBatch(budget)) do
+			local part = data.part
 
 			local diff = part.Position - camPos
-
-			-- distância sem sqrt
 			local distSq = diff.X*diff.X + diff.Y*diff.Y + diff.Z*diff.Z
 
-			-- direção normalizada simplificada
-			local mag = math.max(distSq, 0.0001)
-			local dir = diff / mag
+			local mag = math.sqrt(distSq)
+			if mag == 0 then continue end
 
-			-- dot product (visão)
+			local dir = diff / mag
 			local dot = dir:Dot(camLook)
 
-			-- 🔥 FORA DA TELA = HIBERNAR
-			if dot < SETTINGS.FOV_DOT then
-				if not originalParent[part] then
-					originalParent[part] = part.Parent
-					part.Parent = nil
-				end
+			-- prioridade afeta agressividade
+			local priorityBoost = data.priority * 0.05
+
+			if dot < (SETTINGS.FOV_DOT - priorityBoost) then
+				applyState(data, 3)
 				continue
 			end
 
-			-- NEAR
 			if distSq <= NEAR_SQ then
-				if originalParent[part] then
-					part.Parent = originalParent[part]
-					originalParent[part] = nil
-				end
+				applyState(data, 0)
 
-				part.LocalTransparencyModifier = 0
-				part.CanCollide = true
-
-			-- MID
 			elseif distSq <= MID_SQ then
-				if originalParent[part] then
-					part.Parent = originalParent[part]
-					originalParent[part] = nil
-				end
+				applyState(data, 1)
 
-				part.LocalTransparencyModifier = 0.5
-				part.CastShadow = false
-				part.Material = Enum.Material.SmoothPlastic
+			elseif distSq <= FAR_SQ then
+				applyState(data, 2)
 
-			-- FAR
 			else
-				if not originalParent[part] then
-					originalParent[part] = part.Parent
-					part.Parent = nil
-				end
+				applyState(data, 3)
 			end
 		end
 	end
 end)
 
--- CLEAN
+--// CLEAN
 task.spawn(function()
 	while true do
 		task.wait(10)
 
 		for i = #objects, 1, -1 do
 			local obj = objects[i]
-			if not obj or not obj.Parent then
-				objects[i] = nil
+			if not obj or not obj.part or not obj.part.Parent then
+				table.remove(objects, i)
 			end
 		end
 
-		collectgarbage("step", 400)
+		collectgarbage("step", 300)
 	end
 end)
 
-print("💀 OTIMIZADOR V8 EXTREMO ATIVO")
+print("🚀 OTIMIZADOR V10 INTELIGENTE ATIVO")
