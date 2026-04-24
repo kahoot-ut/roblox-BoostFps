@@ -3,202 +3,182 @@
 --// SERVICES
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 local camera = Workspace.CurrentCamera
 
 --// CONFIG
 local SETTINGS = {
-	BATCH_MIN = 200,
-	BATCH_MAX = 700,
+	GRID_SIZE = 200,
+	UPDATE_RATE = 0.1,
+	MAX_PER_FRAME = 120,
 
-	DIST_NEAR = 80,
-	DIST_MID = 180,
-	DIST_FAR = 400,
-
-	FOV_DOT = 0,
-
-	FPS_LOW = 35,
-	FPS_MED = 55,
+	DIST_NEAR = 100,
+	DIST_MID = 250,
+	DIST_FAR = 500,
 }
 
-local NEAR_SQ = SETTINGS.DIST_NEAR^2
-local MID_SQ = SETTINGS.DIST_MID^2
-local FAR_SQ = SETTINGS.DIST_FAR^2
-
---// STATE
-type ObjData = {
-	part: BasePart,
+--// TYPES
+type ModelData = {
+	model: Model,
+	parts: {BasePart},
+	primary: BasePart,
 	priority: number,
 	lastState: number
 }
 
-local objects: {ObjData} = {}
-local cursor = 1
-local fps = 60
+--// STATE
+local models: {ModelData} = {}
+local trackedModels: {[Model]: boolean} = {}
+local grid: {[string]: {ModelData}} = {}
 
---// PRIORITY SYSTEM
+--// PRIORITY
 local function getPriority(part: BasePart): number
 	local size = part.Size.Magnitude
-
-	if size > 20 then return 3 end -- grande (importante)
-	if size > 8 then return 2 end  -- médio
-	return 1 -- pequeno
+	if size > 20 then return 3 end
+	if size > 8 then return 2 end
+	return 1
 end
 
---// FILTER
-local function shouldTrack(obj: Instance)
-	if not obj:IsA("BasePart") then return false end
-	if obj:IsDescendantOf(player.Character or nil) then return false end
-	if obj.Name == "HumanoidRootPart" then return false end
+--// GRID
+local function gridKey(pos: Vector3): string
+	return math.floor(pos.X / SETTINGS.GRID_SIZE) .. "," .. math.floor(pos.Z / SETTINGS.GRID_SIZE)
+end
 
-	-- ignora partes minúsculas (grande ganho!)
-	if obj.Size.Magnitude < 1 then return false end
+local function addToGrid(data: ModelData)
+	local key = gridKey(data.primary.Position)
+	grid[key] = grid[key] or {}
+	table.insert(grid[key], data)
+end
 
-	return true
+--// GET MODEL
+local function getModel(inst: Instance): Model?
+	if inst:IsA("Model") then return inst end
+	return inst:FindFirstAncestorOfClass("Model")
 end
 
 --// REGISTER
 local function register(obj: Instance)
-	if not shouldTrack(obj) then return end
+	if not obj:IsA("BasePart") then return end
 
-	local part = obj :: BasePart
+	local char = player.Character
+	if char and obj:IsDescendantOf(char) then return end
 
-	table.insert(objects, {
-		part = part,
-		priority = getPriority(part),
+	local model = getModel(obj)
+	if not model or trackedModels[model] then return end
+
+	local parts = {}
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			table.insert(parts, d)
+		end
+	end
+
+	local primary = model.PrimaryPart or parts[1]
+	if not primary then return end
+
+	local data: ModelData = {
+		model = model,
+		parts = parts,
+		primary = primary,
+		priority = getPriority(primary),
 		lastState = -1
-	})
+	}
+
+	trackedModels[model] = true
+	table.insert(models, data)
+	addToGrid(data)
 end
 
+--// INITIAL LOAD
 for _, obj in ipairs(Workspace:GetDescendants()) do
 	register(obj)
 end
 
 Workspace.DescendantAdded:Connect(register)
 
---// FPS TRACK
-task.spawn(function()
-	local last = tick()
-	local frames = 0
-
-	RunService.Heartbeat:Connect(function()
-		frames += 1
-		if tick() - last >= 1 then
-			fps = frames
-			frames = 0
-			last = tick()
-		end
-	end)
-end)
-
---// NEXT BATCH (PRIORITY AWARE)
-local function nextBatch(size)
-	local batch = {}
-
-	for i = 1, size do
-		if cursor > #objects then
-			cursor = 1
-			break
-		end
-
-		local obj = objects[cursor]
-		cursor += 1
-
-		if obj and obj.part and obj.part.Parent then
-			table.insert(batch, obj)
-		end
-	end
-
-	return batch
-end
-
---// APPLY STATE (COM CACHE)
-local function applyState(data: ObjData, state: number)
+--// APPLY STATE
+local function applyModelState(data: ModelData, state: number)
 	if data.lastState == state then return end
 	data.lastState = state
 
-	local part = data.part
+	for _, part in ipairs(data.parts) do
+		if not part or not part.Parent then continue end
 
-	if state == 0 then -- NEAR
-		part.LocalTransparencyModifier = 0
-		part.CastShadow = true
-		part.CanCollide = true
+		if state == 0 then
+			part.LocalTransparencyModifier = 0
+			part.CanCollide = true
 
-	elseif state == 1 then -- MID
-		part.LocalTransparencyModifier = 0.4
-		part.CastShadow = false
-		part.Material = Enum.Material.SmoothPlastic
-		part.CanCollide = true
+		elseif state == 1 then
+			part.LocalTransparencyModifier = 0.4
+			part.CanCollide = true
 
-	elseif state == 2 then -- FAR
-		part.LocalTransparencyModifier = 0.85
-		part.CastShadow = false
-		part.CanCollide = false
+		elseif state == 2 then
+			part.LocalTransparencyModifier = 0.85
+			part.CanCollide = false
 
-	elseif state == 3 then -- HIDDEN
-		part.LocalTransparencyModifier = 1
-		part.CastShadow = false
-		part.CanCollide = false
+		else
+			part.LocalTransparencyModifier = 1
+			part.CanCollide = false
+		end
 	end
 end
 
 --// MAIN LOOP
 task.spawn(function()
 	while true do
-		local budget = math.clamp(math.floor(fps * 7), SETTINGS.BATCH_MIN, SETTINGS.BATCH_MAX)
-		task.wait(math.clamp(1 / fps, 0.08, 0.2))
+		task.wait(SETTINGS.UPDATE_RATE)
 
-		local camCF = camera.CFrame
-		local camPos = camCF.Position
-		local camLook = camCF.LookVector
+		local camPos = camera.CFrame.Position
+		local baseX = math.floor(camPos.X / SETTINGS.GRID_SIZE)
+		local baseZ = math.floor(camPos.Z / SETTINGS.GRID_SIZE)
 
-		for _, data in ipairs(nextBatch(budget)) do
-			local part = data.part
+		local checked = 0
 
-			local diff = part.Position - camPos
-			local distSq = diff.X*diff.X + diff.Y*diff.Y + diff.Z*diff.Z
+		for dx = -1, 1 do
+			for dz = -1, 1 do
+				local key = (baseX + dx) .. "," .. (baseZ + dz)
+				local cell = grid[key]
+				if not cell then continue end
 
-			local mag = math.sqrt(distSq)
-			if mag == 0 then continue end
+				for _, data in ipairs(cell) do
+					if checked >= SETTINGS.MAX_PER_FRAME then break end
+					checked += 1
 
-			local dir = diff / mag
-			local dot = dir:Dot(camLook)
+					local part = data.primary
+					if not part or not part.Parent then continue end
 
-			-- prioridade afeta agressividade
-			local priorityBoost = data.priority * 0.05
+					local dist = (part.Position - camPos).Magnitude
 
-			if dot < (SETTINGS.FOV_DOT - priorityBoost) then
-				applyState(data, 3)
-				continue
-			end
+					local near = SETTINGS.DIST_NEAR * (1 + data.priority * 0.2)
+					local mid  = SETTINGS.DIST_MID  * (1 + data.priority * 0.15)
+					local far  = SETTINGS.DIST_FAR  * (1 + data.priority * 0.1)
 
-			if distSq <= NEAR_SQ then
-				applyState(data, 0)
-
-			elseif distSq <= MID_SQ then
-				applyState(data, 1)
-
-			elseif distSq <= FAR_SQ then
-				applyState(data, 2)
-
-			else
-				applyState(data, 3)
+					if dist <= near then
+						applyModelState(data, 0)
+					elseif dist <= mid then
+						applyModelState(data, 1)
+					elseif dist <= far then
+						applyModelState(data, 2)
+					else
+						applyModelState(data, 3)
+					end
+				end
 			end
 		end
 	end
 end)
 
---// CLEAN
+--// CLEANUP LOOP
 task.spawn(function()
 	while true do
 		task.wait(10)
 
-		for i = #objects, 1, -1 do
-			local obj = objects[i]
-			if not obj or not obj.part or not obj.part.Parent then
-				table.remove(objects, i)
+		for i = #models, 1, -1 do
+			local data = models[i]
+			if not data.model or not data.model.Parent then
+				trackedModels[data.model] = nil
+				table.remove(models, i)
 			end
 		end
 
@@ -206,4 +186,4 @@ task.spawn(function()
 	end
 end)
 
-print("🚀 OTIMIZADOR V10 INTELIGENTE ATIVO")
+print("🚀 V12 OPTIMIZER (MODEL + GRID) ACTIVE")
